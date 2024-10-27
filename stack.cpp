@@ -7,8 +7,23 @@
 #define RECT_SIZE 50 // Rozmiar pola do analizy ostrości
 #define DILATION_ITER 5 // Ilość iteracji rozszerzenia maski
 
+/* TODO:
+ * color normalisation! (https://github.com/PetteriAimonen/focus-stack/blob/master/src/task_align.cc)
+ */
+
+/*
+ * Based or inspired on:
+ * https://github.com/bznick98/Focus_Stacking      1/2
+ * https://github.com/cmcguinness/focusstack       1  
+ * https://github.com/PetteriAimonen/focus-stack   1
+ * https://github.com/abadams/ImageStack           0 (there is no)
+ * https://github.com/maitek/image_stacking        1
+ */
+
 
 // Metoda 1: Stacking za pomocą Laplacian (piksel po pikselu)
+// as in https://github.com/cmcguinness/focusstack
+// as in https://github.com/PetteriAimonen/focus-stack
 cv::Mat stackLaplacian(const std::vector<cv::Mat>& images) {
     if (images.empty()) {
         std::cerr << "No images to stack!" << std::endl;
@@ -22,6 +37,11 @@ cv::Mat stackLaplacian(const std::vector<cv::Mat>& images) {
     for (size_t i = 0; i < images.size(); ++i) {
         cv::cvtColor(images[i], grayImages[i], cv::COLOR_BGR2GRAY);
         cv::Laplacian(grayImages[i], laplacians[i], CV_64F);
+
+        // Uzyskanie wartości absolutnej wyników (aby uniknąć wartości ujemnych)
+        cv::Mat absLaplacian;
+        cv::convertScaleAbs(laplacians[i], absLaplacian);
+        laplacians[i] = absLaplacian; // Zastąpienie oryginalnego Laplace'a przetworzonym
     }
 
     cv::Mat result = images[0].clone();
@@ -43,7 +63,7 @@ cv::Mat stackLaplacian(const std::vector<cv::Mat>& images) {
             int bestImageIndex = 0;
 
             for (size_t i = 0; i < images.size(); ++i) {
-                double currentSharpness = laplacians[i].at<double>(y, x); // Bez konwersji
+                double currentSharpness = laplacians[i].at<unsigned char>(y, x); // Używamy unsigned char, ponieważ mamy wartości 0-255
                 if (currentSharpness > maxSharpness) {
                     maxSharpness = currentSharpness;
                     bestImageIndex = i;
@@ -55,6 +75,45 @@ cv::Mat stackLaplacian(const std::vector<cv::Mat>& images) {
     }
 
     std::cout << "Processing complete!" << std::endl;
+    return result;
+}
+
+// Metoda 2: Stacking z użyciem map ostrości i maski
+cv::Mat stackWithMask(const std::vector<cv::Mat>& images) {
+    if (images.empty()) {
+        std::cerr << "No images to stack!" << std::endl;
+        return cv::Mat();
+    }
+
+    std::vector<cv::Mat> laplacianImages;
+    for (const auto& image : images) {
+        cv::Mat gray, laplacian;
+        cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0);
+        cv::Laplacian(gray, laplacian, CV_64F);
+        cv::convertScaleAbs(laplacian, laplacian);
+        laplacianImages.push_back(laplacian);
+    }
+
+    cv::Mat result = images[0].clone();
+
+    for (int y = 0; y < result.rows; ++y) {
+        for (int x = 0; x < result.cols; ++x) {
+            double maxSharpness = 0.0;
+            int bestImageIndex = 0;
+
+            for (size_t i = 0; i < laplacianImages.size(); ++i) {
+                double currentSharpness = laplacianImages[i].at<uchar>(y, x);
+                if (currentSharpness > maxSharpness) {
+                    maxSharpness = currentSharpness;
+                    bestImageIndex = i;
+                }
+            }
+
+            result.at<cv::Vec3b>(y, x) = images[bestImageIndex].at<cv::Vec3b>(y, x);
+        }
+    }
+
     return result;
 }
 
@@ -112,44 +171,6 @@ cv::Mat stackWithSharpnessMask(const std::vector<cv::Mat>& images) {
 }
 
 
-// Metoda 2: Stacking z użyciem map ostrości i maski
-cv::Mat stackWithMask(const std::vector<cv::Mat>& images) {
-    if (images.empty()) {
-        std::cerr << "No images to stack!" << std::endl;
-        return cv::Mat();
-    }
-
-    std::vector<cv::Mat> laplacianImages;
-    for (const auto& image : images) {
-        cv::Mat gray, laplacian;
-        cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
-        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0);
-        cv::Laplacian(gray, laplacian, CV_64F);
-        cv::convertScaleAbs(laplacian, laplacian);
-        laplacianImages.push_back(laplacian);
-    }
-
-    cv::Mat result = images[0].clone();
-
-    for (int y = 0; y < result.rows; ++y) {
-        for (int x = 0; x < result.cols; ++x) {
-            double maxSharpness = 0.0;
-            int bestImageIndex = 0;
-
-            for (size_t i = 0; i < laplacianImages.size(); ++i) {
-                double currentSharpness = laplacianImages[i].at<uchar>(y, x);
-                if (currentSharpness > maxSharpness) {
-                    maxSharpness = currentSharpness;
-                    bestImageIndex = i;
-                }
-            }
-
-            result.at<cv::Vec3b>(y, x) = images[bestImageIndex].at<cv::Vec3b>(y, x);
-        }
-    }
-
-    return result;
-}
 
 // Metoda 4: Funkcja do stakowania obrazów z prostokątami ostrości
 // Funkcja do stakowania obrazów z prostokątami ostrości
@@ -313,6 +334,7 @@ cv::Mat stackWithFloatingMasks(const std::vector<cv::Mat>& images) {
 }
 
 //Metoda 6: odpowiednik naive_focus_stacking z Focus_Stacking (python)
+// as in https://github.com/bznick98/Focus_Stacking (naive_focus_stacking)
 cv::Mat stackWithFloatingMasks2(const std::vector<cv::Mat>& images, bool debug = false) {
     if (images.empty()) {
         throw std::runtime_error("No images provided for stacking.");
@@ -387,6 +409,7 @@ cv::Mat stackWithFloatingMasks2(const std::vector<cv::Mat>& images, bool debug =
 }
 
 //Metoda 7: na inspirowane (?) stack.py i utils.py, ale nie działa 
+// as in https://github.com/bznick98/Focus_Stacking (lap_focus_stacking) - NOT WORKING YET
 cv::Mat stackWithLaplacianPyramid(const std::vector<cv::Mat>& images, int N = 3) {
     // Przechowuje obrazy Laplace'a
     std::vector<cv::Mat> LP_f;
@@ -445,7 +468,10 @@ cv::Mat stackWithLaplacianPyramid(const std::vector<cv::Mat>& images, int N = 3)
 }
 
 
-//Metoda 8: siódemka, ale cieniowana
+//Metoda 8:  
+// inspired by https://github.com/bznick98/Focus_Stacking
+// it creates something alike shadowed wimage - it does not look like drill, but might be useful while 
+// measuring tool wear.
 cv::Mat stackWithLaplacianPyramidShadow(const std::vector<cv::Mat>& images, int N = 3) {
     if (images.empty()) {
         throw std::invalid_argument("List of images is empty.");
@@ -512,6 +538,8 @@ cv::Mat stackWithLaplacianPyramidShadow(const std::vector<cv::Mat>& images, int 
 
 //Metoda 9: na podstawie: https://github.com/maitek/image_stacking/blob/master/auto_stack.py
 // wyliczanie średniej z kolorów z wszystkich obrazów.
+// as in https://github.com/maitek/image_stacking (both stackImagesKeypointMatching and stackImagesECC)
+// as in https://github.com/bznick98/Focus_Stacking
 cv::Mat stackByAverage(const std::vector<cv::Mat>& images) {
     if (images.empty()) {
         throw std::invalid_argument("The input vector is empty.");
@@ -532,6 +560,9 @@ cv::Mat stackByAverage(const std::vector<cv::Mat>& images) {
 
     return average;
 }
+
+//Metoda 10: 
+
 
 //Koniec METOD
 

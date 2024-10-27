@@ -32,7 +32,7 @@ process_directory() {
   #echo "Znalezione pliki: ${cut_files[@]}"  # Debugowanie: wyświetlenie znalezionych plików
 
   # Przetwarzanie metod od -a1 do -a6
-  for i in {4,8,9,10}; do
+  for i in {11..11}; do
     method="-a$i"
 
     # Ustawienie pliku początkowego dla tej metody
@@ -69,7 +69,7 @@ process_directory() {
       align_output=$($command)
 
       # Usuwanie nowych linii z wyjścia komendy
-      align_output=$(echo "$align_output" | tr -d '\n')
+      #align_output=$(echo "$align_output" | tr -d '\n')
 
       # Nazwa pliku wyjściowego (przwidywana)
       aligned_file="$wip_dir/Aligned-a$i.$base_name"  # Zachowujemy oryginalną nazwę

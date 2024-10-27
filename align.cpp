@@ -7,13 +7,15 @@
  * Based or inspired on:
  * https://github.com/bznick98/Focus_Stacking       2
  * https://github.com/cmcguinness/focusstack        2
- * https://github.com/PetteriAimonen/focus-stack        
- * https://github.com/abadams/ImageStack            
+ * https://github.com/PetteriAimonen/focus-stack    1
+ * https://github.com/abadams/ImageStack            4 (met. 12-15)
  * https://github.com/maitek/image_stacking         2
  */
 
 #include <opencv2/opencv.hpp>
 #include <opencv2/features2d.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/highgui.hpp>
 
 #include <iostream>
 #include <vector>
@@ -360,8 +362,9 @@ void alignImageSIFTNoFilter(const cv::Mat& baseImage, const cv::Mat& imgToAlign,
     warpAffine(imgToAlign, result, translationMat, baseImage.size());
 }
 
-//Metoda 10: 
+//Metoda 10:
 //https://github.com/maitek/image_stacking/blob/master/auto_stack.py (stackImagesECC)
+//https://github.com/PetteriAimonen/focus-stack
 void alignImagesECC(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift) {
     // Konwersja obrazów do skali szarości
     cv::Mat baseGray, alignGray;
@@ -379,6 +382,317 @@ void alignImagesECC(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat
 
     // Wyrównanie obrazu do podstawowego
     cv::warpPerspective(imgToAlign, result, M, baseImage.size());
+}
+
+//Metoda 11: 
+//as in https://github.com/bznick98/Focus_Stacking
+// rezygnujemy z metody piramid, ponieważ wymaga ona wykorzystania matchTemplate, homography
+// lub innego dopasowywania, a wszystkie są wykorzystywane w innych metodach
+// możliwe, że metoda piramid by przyspieszyła proces, ale nie jest to kluczowe w tym zastosowaniu.
+void alignImagesByPyramid(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, int N = 3) {
+    // Zmiana formatu obrazów na 8-bitowe
+    cv::Mat baseGray, imgGray;
+    cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(imgToAlign, imgGray, cv::COLOR_BGR2GRAY);
+
+    // Tworzenie piramidy Gaussa dla obrazu bazowego
+    std::vector<cv::Mat> baseGaussianPyramid;
+    baseGaussianPyramid.push_back(baseGray);
+    for (int i = 0; i < N; ++i) {
+        cv::Mat down;
+        cv::pyrDown(baseGaussianPyramid.back(), down);
+        baseGaussianPyramid.push_back(down);
+    }
+
+    // Tworzenie piramidy Gaussa dla obrazu do wyrównania
+    std::vector<cv::Mat> imgGaussianPyramid;
+    imgGaussianPyramid.push_back(imgGray);
+    for (int i = 0; i < N; ++i) {
+        cv::Mat down;
+        cv::pyrDown(imgGaussianPyramid.back(), down);
+        imgGaussianPyramid.push_back(down);
+    }
+
+    // Inicjalizacja obrazu wyrównanego i przesunięcia
+    cv::Mat alignedImage = imgGaussianPyramid[N].clone();
+    shift = cv::Point2f(0.0f, 0.0f);
+
+    // Wyrównywanie od najwyższego poziomu piramidy do najniższego
+    for (int level = N; level >= 0; --level) {
+        cv::Mat baseLevel = baseGaussianPyramid[level];
+        cv::Mat imgLevel = imgGaussianPyramid[level];
+
+        // Wykrywanie punktów kluczowych i opisów
+        cv::Ptr<cv::ORB> detector = cv::ORB::create();
+        std::vector<cv::KeyPoint> keypointsBase, keypointsImg;
+        cv::Mat descriptorsBase, descriptorsImg;
+        detector->detectAndCompute(baseLevel, cv::noArray(), keypointsBase, descriptorsBase);
+        detector->detectAndCompute(imgLevel, cv::noArray(), keypointsImg, descriptorsImg);
+
+        // Dopasowywanie punktów kluczowych
+        cv::BFMatcher matcher(cv::NORM_HAMMING);
+        std::vector<cv::DMatch> matches;
+        matcher.match(descriptorsBase, descriptorsImg, matches);
+
+        // Filtracja dopasowań
+        std::vector<cv::DMatch> goodMatches;
+        double max_dist = 0; 
+        double min_dist = 100;
+
+        for (const auto& match : matches) {
+            double dist = match.distance;
+            if (dist < min_dist) min_dist = dist;
+            if (dist > max_dist) max_dist = dist;
+        }
+
+        for (const auto& match : matches) {
+            if (match.distance <= std::max(2 * min_dist, 30.0)) {
+                goodMatches.push_back(match);
+            }
+        }
+
+        // Oblicz homografię tylko jeśli są wystarczające dopasowania
+        if (goodMatches.size() >= 4) {
+            std::vector<cv::Point2f> pointsBase, pointsImg;
+            for (const auto& match : goodMatches) {
+                pointsBase.push_back(keypointsBase[match.queryIdx].pt);
+                pointsImg.push_back(keypointsImg[match.trainIdx].pt);
+            }
+
+            cv::Mat homography = cv::findHomography(pointsImg, pointsBase, cv::RANSAC);
+            if (!homography.empty()) {
+                // Oblicz przesunięcie
+                shift.x += homography.at<double>(0, 2); // x przesunięcie
+                shift.y += homography.at<double>(1, 2); // y przesunięcie
+
+                // Zastosuj homografię
+                cv::warpPerspective(alignedImage, alignedImage, homography, baseLevel.size());
+            }
+        }
+
+        // Zwiększ obraz do następnego poziomu
+        if (level > 0) {
+            cv::Mat up;
+            cv::pyrUp(alignedImage, up, baseGaussianPyramid[level - 1].size());
+            alignedImage = up;
+        }
+    }
+
+    // Ustalenie ostatecznego obrazu
+    alignedImage.copyTo(result);
+
+    // Skoryguj przesunięcie na podstawie rozmiaru obrazu
+    shift.x /= (1 << N); // Podziel przez 2^N
+    shift.y /= (1 << N); // Podziel przez 2^N
+}
+
+//Metoda 12: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
+//I'ts almost the same as Rigid, so we wont use Rigid.
+void alignImageAffine(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+    // Convert images to grayscale
+    cv::Mat baseGray, srcGray;
+    cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(srcImage, srcGray, cv::COLOR_BGR2GRAY);
+
+    // ORB feature detection and descriptor computation
+    cv::Ptr<cv::ORB> orb = cv::ORB::create();
+    std::vector<cv::KeyPoint> keypointsBase, keypointsSrc;
+    cv::Mat descriptorsBase, descriptorsSrc;
+    orb->detectAndCompute(baseGray, cv::noArray(), keypointsBase, descriptorsBase);
+    orb->detectAndCompute(srcGray, cv::noArray(), keypointsSrc, descriptorsSrc);
+
+    // Matching descriptors using BFMatcher
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    std::vector<cv::DMatch> matches;
+    matcher.match(descriptorsBase, descriptorsSrc, matches);
+    std::sort(matches.begin(), matches.end());
+
+    // Keep only the best matches
+    const int numGoodMatches = matches.size() * 0.1;
+    matches.erase(matches.begin() + numGoodMatches, matches.end());
+
+    // Extract point locations from matches
+    std::vector<cv::Point2f> pointsBase, pointsSrc;
+    for (size_t i = 0; i < matches.size(); ++i) {
+        pointsBase.push_back(keypointsBase[matches[i].queryIdx].pt);
+        pointsSrc.push_back(keypointsSrc[matches[i].trainIdx].pt);
+    }
+
+    // Compute affine transformation matrix
+    cv::Mat affineMatrix = cv::estimateAffinePartial2D(pointsSrc, pointsBase);
+
+    // Warp the source image
+    cv::warpAffine(srcImage, result, affineMatrix, baseImage.size());
+
+    // Calculate the translation shift from affine matrix
+    shift.x = affineMatrix.at<double>(0, 2);
+    shift.y = affineMatrix.at<double>(1, 2);
+}
+
+//Metoda 13: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
+void alignImageTranslation(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+    // Konwersja obrazów do odcieni szarości
+    cv::Mat baseGray, srcGray;
+    cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(srcImage, srcGray, cv::COLOR_BGR2GRAY);
+
+    // Wykrywanie cech i obliczanie deskryptorów ORB
+    cv::Ptr<cv::ORB> orb = cv::ORB::create();
+    std::vector<cv::KeyPoint> keypointsBase, keypointsSrc;
+    cv::Mat descriptorsBase, descriptorsSrc;
+    orb->detectAndCompute(baseGray, cv::noArray(), keypointsBase, descriptorsBase);
+    orb->detectAndCompute(srcGray, cv::noArray(), keypointsSrc, descriptorsSrc);
+
+    // Dopasowywanie deskryptorów przy użyciu BFMatcher
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    std::vector<cv::DMatch> matches;
+    matcher.match(descriptorsBase, descriptorsSrc, matches);
+    std::sort(matches.begin(), matches.end());
+
+    // Zachowanie tylko najlepszych dopasowań
+    const int numGoodMatches = matches.size() * 0.1;
+    matches.erase(matches.begin() + numGoodMatches, matches.end());
+
+    // Ekstrakcja lokalizacji punktów z dopasowań
+    std::vector<cv::Point2f> pointsBase, pointsSrc;
+    for (const auto& match : matches) {
+        pointsBase.push_back(keypointsBase[match.queryIdx].pt);
+        pointsSrc.push_back(keypointsSrc[match.trainIdx].pt);
+    }
+
+    // Obliczanie średnich punktów dla translacji
+    if (pointsBase.empty() || pointsSrc.empty()) {
+        std::cerr << "Brak wystarczających punktów do obliczenia translacji!" << std::endl;
+        return;
+    }
+
+    // Obliczanie środka
+    cv::Point2f centerBase(0, 0), centerSrc(0, 0);
+    for (const auto& pt : pointsBase) {
+        centerBase += pt;
+    }
+    for (const auto& pt : pointsSrc) {
+        centerSrc += pt;
+    }
+    centerBase.x /= pointsBase.size();
+    centerBase.y /= pointsBase.size();
+    centerSrc.x /= pointsSrc.size();
+    centerSrc.y /= pointsSrc.size();
+
+    // Obliczanie przesunięcia
+    shift = centerBase - centerSrc;
+
+    // Ustalanie macierzy translacji
+    cv::Mat translationMatrix = (cv::Mat_<double>(2, 3) << 1, 0, shift.x, 0, 1, shift.y);
+
+    // Odkształcanie źródłowego obrazu
+    cv::warpAffine(srcImage, result, translationMatrix, baseImage.size());
+}
+
+//Metoda 14: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
+void alignImageSimilarity(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+    // Konwersja obrazów do odcieni szarości
+    cv::Mat baseGray, srcGray;
+    cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(srcImage, srcGray, cv::COLOR_BGR2GRAY);
+
+    // Wykrywanie cech i obliczanie deskryptorów ORB
+    cv::Ptr<cv::ORB> orb = cv::ORB::create();
+    std::vector<cv::KeyPoint> keypointsBase, keypointsSrc;
+    cv::Mat descriptorsBase, descriptorsSrc;
+    orb->detectAndCompute(baseGray, cv::noArray(), keypointsBase, descriptorsBase);
+    orb->detectAndCompute(srcGray, cv::noArray(), keypointsSrc, descriptorsSrc);
+
+    // Dopasowywanie deskryptorów przy użyciu BFMatcher
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    std::vector<cv::DMatch> matches;
+    matcher.match(descriptorsBase, descriptorsSrc, matches);
+    std::sort(matches.begin(), matches.end());
+
+    // Zachowanie tylko najlepszych dopasowań
+    const int numGoodMatches = matches.size() * 0.1;
+    matches.erase(matches.begin() + numGoodMatches, matches.end());
+
+    // Ekstrakcja lokalizacji punktów z dopasowań
+    std::vector<cv::Point2f> pointsBase, pointsSrc;
+    for (const auto& match : matches) {
+        pointsBase.push_back(keypointsBase[match.queryIdx].pt);
+        pointsSrc.push_back(keypointsSrc[match.trainIdx].pt);
+    }
+
+    // Obliczanie macierzy podobieństwa
+    cv::Mat similarityMatrix = cv::estimateAffine2D(pointsSrc, pointsBase);
+
+    // Sprawdzenie, czy macierz została poprawnie obliczona
+    if (similarityMatrix.empty()) {
+        std::cerr << "Nie udało się obliczyć macierzy podobieństwa!" << std::endl;
+        return;
+    }
+
+    // Odkształcanie źródłowego obrazu
+    cv::warpAffine(srcImage, result, similarityMatrix, baseImage.size());
+
+    // Obliczanie przesunięcia z macierzy podobieństwa
+    shift.x = similarityMatrix.at<double>(0, 2);
+    shift.y = similarityMatrix.at<double>(1, 2);
+}
+
+//Metoda 15: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
+void alignImageTransform(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+    // Konwersja obrazów do odcieni szarości
+    cv::Mat baseGray, srcGray;
+    cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(srcImage, srcGray, cv::COLOR_BGR2GRAY);
+
+    // Wykrywanie cech i obliczanie deskryptorów ORB
+    cv::Ptr<cv::ORB> orb = cv::ORB::create();
+    std::vector<cv::KeyPoint> keypointsBase, keypointsSrc;
+    cv::Mat descriptorsBase, descriptorsSrc;
+    orb->detectAndCompute(baseGray, cv::noArray(), keypointsBase, descriptorsBase);
+    orb->detectAndCompute(srcGray, cv::noArray(), keypointsSrc, descriptorsSrc);
+
+    // Dopasowywanie deskryptorów przy użyciu BFMatcher
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    std::vector<cv::DMatch> matches;
+    matcher.match(descriptorsBase, descriptorsSrc, matches);
+    std::sort(matches.begin(), matches.end());
+
+    // Zachowanie tylko najlepszych dopasowań
+    const int numGoodMatches = matches.size() * 0.1;
+    matches.erase(matches.begin() + numGoodMatches, matches.end());
+
+    // Ekstrakcja lokalizacji punktów z dopasowań
+    std::vector<cv::Point2f> pointsBase, pointsSrc;
+    for (const auto& match : matches) {
+        pointsBase.push_back(keypointsBase[match.queryIdx].pt);
+        pointsSrc.push_back(keypointsSrc[match.trainIdx].pt);
+    }
+
+    // Sprawdzanie, czy mamy wystarczającą liczbę punktów do obliczenia macierzy perspektywicznej
+    if (pointsSrc.size() < 4 || pointsBase.size() < 4) {
+        std::cerr << "Niewystarczająca liczba punktów do obliczenia transformacji!" << std::endl;
+        return;
+    }
+
+    // Wybieramy dokładnie cztery najlepsze dopasowania punktów
+    pointsBase.resize(4);
+    pointsSrc.resize(4);
+
+    // Obliczanie macierzy perspektywicznej
+    cv::Mat perspectiveMatrix = cv::getPerspectiveTransform(pointsSrc, pointsBase);
+
+    // Sprawdzenie, czy macierz została poprawnie obliczona
+    if (perspectiveMatrix.empty()) {
+        std::cerr << "Nie udało się obliczyć macierzy perspektywicznej!" << std::endl;
+        return;
+    }
+
+    // Odkształcanie źródłowego obrazu
+    cv::warpPerspective(srcImage, result, perspectiveMatrix, baseImage.size());
+
+    // Przesunięcie na podstawie macierzy perspektywicznej (zakładając, że chodzi o translację)
+    shift.x = perspectiveMatrix.at<double>(0, 2);
+    shift.y = perspectiveMatrix.at<double>(1, 2);
 }
 
 // Funkcja do kopiowania pliku
@@ -447,6 +761,16 @@ int main(int argc, char** argv) {
             alignImageSIFTNoFilter(baseImage, srcImage, result, shift);
         } else if (alignmentMethod == "-a10") {
             alignImagesECC(baseImage, srcImage, result, shift); 
+        } else if (alignmentMethod == "-a11") {
+            alignImagesByPyramid(baseImage, srcImage, result, shift); 
+        } else if (alignmentMethod == "-a12") {
+            alignImageAffine(baseImage, srcImage, result, shift); 
+        } else if (alignmentMethod == "-a13") {
+            alignImageTranslation(baseImage, srcImage, result, shift); 
+        } else if (alignmentMethod == "-a14") {
+            alignImageSimilarity(baseImage, srcImage, result, shift); 
+        } else if (alignmentMethod == "-a15") {
+            alignImageTransform(baseImage, srcImage, result, shift); 
         } else {
             std::cerr << "Unknown alignment method!" << std::endl;
             return -1;
