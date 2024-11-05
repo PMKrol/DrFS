@@ -710,7 +710,7 @@ int main(int argc, char** argv) {
     std::string method = argv[1];
     std::string aX = argv[2];  // Przykład: "-aX"
 
-    if (aX.length() != 3 || aX[0] != '-' || aX[1] != 'a') {
+    if (aX.length() < 3 || aX[0] != '-' || aX[1] != 'a') {
         std::cerr << "Invalid format for -aX switch" << std::endl;
         return -1;
     }

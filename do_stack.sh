@@ -24,8 +24,8 @@ process_directory() {
   fi
 
   # Przetwarzanie metod -m1 do -m9 i -a4 oraz -a8
-  for m in {7..8}; do
-    for a in {4..4}; do
+  for m in {1..9}; do
+    for a in {12..12}; do
       method="-m$m -a$a"
 
       # Tworzenie komendy stack

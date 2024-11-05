@@ -35,7 +35,7 @@ const int SMALL_OFFSET = 10;
 //as in https://github.com/maitek/image_stacking/blob/master/auto_stack.py (stackImagesKeypointMatching)
 //as in https://github.com/cmcguinness/focusstack/blob/master/FocusStack.py (align_images)
 //as in https://github.com/bznick98/Focus_Stacking/blob/master/src/utils.py (align_images)
-void alignImageORB(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+void alignImageORB(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Convert images to grayscale
     cv::Mat baseGray, srcGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -70,6 +70,9 @@ void alignImageORB(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& r
 
     // Warp the source image
     cv::warpPerspective(srcImage, result, H, baseImage.size());
+    
+    // Oblicz skalowanie jako średnią z wartości diagonalnych macierzy homografii
+    scale = std::sqrt(H.at<double>(0, 0) * H.at<double>(0, 0) + H.at<double>(1, 1) * H.at<double>(1, 1)) / std::sqrt(2);
 
     // Calculate the translation shift from homography matrix
     shift.x = H.at<double>(0, 2);
@@ -78,7 +81,7 @@ void alignImageORB(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& r
 
 
 // Method 2: Phase correlation alignment
-void alignImagePhaseCorrelation(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+void alignImagePhaseCorrelation(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Convert to grayscale
     cv::Mat baseGray, srcGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -98,10 +101,12 @@ void alignImagePhaseCorrelation(const cv::Mat& baseImage, const cv::Mat& srcImag
     // Apply translation to align the images
     cv::Mat translationMatrix = (cv::Mat_<double>(2, 3) << 1, 0, shift.x, 0, 1, shift.y);
     cv::warpAffine(srcImage, result, translationMatrix, baseImage.size());
+    
+    scale = 1.0f;
 }
 
 // Method 3: FFT-based alignment
-void alignImageFFT(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+void alignImageFFT(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Convert images to grayscale
     cv::Mat baseGray, srcGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -143,13 +148,16 @@ void alignImageFFT(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& r
     // Apply translation to align the images
     cv::Mat translationMatrix = (cv::Mat_<double>(2, 3) << 1, 0, shift.x, 0, 1, shift.y);
     cv::warpAffine(srcImage, result, translationMatrix, baseImage.size());
+    
+    // Skalowanie ustalone na 1.0, ponieważ nie dokonujemy zmian rozmiaru w tej metodzie
+    scale = 1.0f;
 }
 
 
 // Method 4: SIFT-based alignment
 // as in https://github.com/cmcguinness/focusstack/blob/master/FocusStack.py (align_images)
 // as in https://github.com/bznick98/Focus_Stacking/blob/master/src/utils.py (align_images)
-void alignImageSIFT(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift) {
+void alignImageSIFT(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
 
     Ptr<Feature2D> detector = SIFT::create();
     
@@ -185,13 +193,16 @@ void alignImageSIFT(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat
     // Find homography and warp
     Mat H = findHomography(pts2, pts1, RANSAC);
     warpPerspective(imgToAlign, result, H, baseImage.size());
+    
+    // Oblicz skalowanie z macierzy homografii
+    scale = std::sqrt(H.at<double>(0, 0) * H.at<double>(0, 0) + H.at<double>(1, 1) * H.at<double>(1, 1)) / std::sqrt(2);
 
     // Calculate shift (only translation component)
     shift = Point2f(H.at<double>(0, 2), H.at<double>(1, 2));
 }
 
 // Method 5: Template matching-based alignment (simple implementation)
-void alignImageByTemplateMatching(const cv::Mat& baseImg, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift) {
+void alignImageByTemplateMatching(const cv::Mat& baseImg, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Convert both images to grayscale
     cv::Mat img1Gray, img2Gray;
     cv::cvtColor(baseImg, img1Gray, cv::COLOR_BGR2GRAY);
@@ -214,10 +225,13 @@ void alignImageByTemplateMatching(const cv::Mat& baseImg, const cv::Mat& imgToAl
 
     // Apply the transformation (translation) to align the image
     cv::warpAffine(imgToAlign, result, translationMat, baseImg.size());
+    
+    // Skalowanie ustalone na 1.0
+    scale = 1.0f;
 }
 
 // Method 6: Funkcja do wyrównywania obrazu na podstawie Canny
-void alignImageByCanny(const cv::Mat& baseImg, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, int margin = MAX_OFFSET, cv::Point2f startPoint = cv::Point2f(0, 0)) {
+void alignImageByCanny(const cv::Mat& baseImg, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale, int margin = MAX_OFFSET, cv::Point2f startPoint = cv::Point2f(0, 0)) {
     // Przetwarzanie obrazu bazowego na krawędzie (Canny)
     Mat baseGray, baseCanny;
     cvtColor(baseImg, baseGray, COLOR_BGR2GRAY);
@@ -261,23 +275,29 @@ void alignImageByCanny(const cv::Mat& baseImg, const cv::Mat& imgToAlign, cv::Ma
     // Przesunięcie obrazu do wyrównania
     Mat translationMatrix = (Mat_<double>(2, 3) << 1, 0, bestOffset.x, 0, 1, bestOffset.y);
     warpAffine(imgToAlign, result, translationMatrix, imgToAlign.size());
+    
+    // Skalowanie ustalone na 1.0
+    scale = 1.0f;
 }
 
 //Method 7: method 3 and 6 combined
-void alignImageByFFTAndCanny(const cv::Mat& baseImg, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift) {
-    alignImageFFT(baseImg, imgToAlign, result, shift);
+void alignImageByFFTAndCanny(const cv::Mat& baseImg, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
+    alignImageFFT(baseImg, imgToAlign, result, shift, scale);
     cv::Point2f startPointByFFT = shift;
     
     if(std::abs(startPointByFFT.x) > MAX_OFFSET || std::abs(startPointByFFT.y) > MAX_OFFSET){
         //fallback to standard values
-        alignImageByCanny(baseImg, imgToAlign, result, shift);
+        alignImageByCanny(baseImg, imgToAlign, result, shift, scale);
     }else{
-        alignImageByCanny(baseImg, imgToAlign, result, shift, SMALL_OFFSET, startPointByFFT); // Canny overlap-based alignment
+        alignImageByCanny(baseImg, imgToAlign, result, shift, scale, SMALL_OFFSET, startPointByFFT); // Canny overlap-based alignment
     }
+    
+    // Skalowanie ustalone na 1.0
+    scale = 1.0f;
 }
 
 // Method 8: SIFT-based translation-only alignment
-void alignImageSIFTTranslationOnly(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift) {
+void alignImageSIFTTranslationOnly(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
     Ptr<Feature2D> detector = SIFT::create();
     
     // Konwersja obrazów do skali szarości
@@ -320,10 +340,14 @@ void alignImageSIFTTranslationOnly(const cv::Mat& baseImage, const cv::Mat& imgT
 
     // Zastosowanie przesunięcia obrazu
     warpAffine(imgToAlign, result, translationMat, baseImage.size());
+    
+    // Skala w translacji-only wynosi 1
+    scale = 1.0f;
+    
 }
 
 // Metoda 9: Dopasowanie obrazów z użyciem SIFT bez filtrowania dopasowań i tylko przesunięcie
-void alignImageSIFTNoFilter(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift) {
+void alignImageSIFTNoFilter(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
     Ptr<Feature2D> detector = SIFT::create();
 
     // Konwersja obrazów na skale szarości
@@ -360,12 +384,15 @@ void alignImageSIFTNoFilter(const cv::Mat& baseImage, const cv::Mat& imgToAlign,
 
     // Zastosowanie przesunięcia (bez zniekształceń)
     warpAffine(imgToAlign, result, translationMat, baseImage.size());
+    
+    // Skala w translacji-only wynosi 1
+    scale = 1.0f;
 }
 
 //Metoda 10:
 //https://github.com/maitek/image_stacking/blob/master/auto_stack.py (stackImagesECC)
 //https://github.com/PetteriAimonen/focus-stack
-void alignImagesECC(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift) {
+void alignImagesECC(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Konwersja obrazów do skali szarości
     cv::Mat baseGray, alignGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -382,6 +409,10 @@ void alignImagesECC(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat
 
     // Wyrównanie obrazu do podstawowego
     cv::warpPerspective(imgToAlign, result, M, baseImage.size());
+    
+    // Obliczanie skali jako długości wektora (skalowanie w kierunku x)
+    scale = std::sqrt(M.at<float>(0, 0) * M.at<float>(0, 0) + M.at<float>(1, 0) * M.at<float>(1, 0));
+
 }
 
 //Metoda 11: 
@@ -389,7 +420,7 @@ void alignImagesECC(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat
 // rezygnujemy z metody piramid, ponieważ wymaga ona wykorzystania matchTemplate, homography
 // lub innego dopasowywania, a wszystkie są wykorzystywane w innych metodach
 // możliwe, że metoda piramid by przyspieszyła proces, ale nie jest to kluczowe w tym zastosowaniu.
-void alignImagesByPyramid(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, int N = 3) {
+void alignImagesByPyramid(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale, int N = 3) {
     // Zmiana formatu obrazów na 8-bitowe
     cv::Mat baseGray, imgGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -467,6 +498,10 @@ void alignImagesByPyramid(const cv::Mat& baseImage, const cv::Mat& imgToAlign, c
 
                 // Zastosuj homografię
                 cv::warpPerspective(alignedImage, alignedImage, homography, baseLevel.size());
+                
+                scale = std::sqrt(homography.at<double>(0, 0) * homography.at<double>(0, 0) +
+                                  homography.at<double>(1, 0) * homography.at<double>(1, 0));
+            
             }
         }
 
@@ -488,7 +523,7 @@ void alignImagesByPyramid(const cv::Mat& baseImage, const cv::Mat& imgToAlign, c
 
 //Metoda 12: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
 //I'ts almost the same as Rigid, so we wont use Rigid.
-void alignImageAffine(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+void alignImageAffine(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Convert images to grayscale
     cv::Mat baseGray, srcGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -527,10 +562,13 @@ void alignImageAffine(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat
     // Calculate the translation shift from affine matrix
     shift.x = affineMatrix.at<double>(0, 2);
     shift.y = affineMatrix.at<double>(1, 2);
+    
+    scale = std::sqrt(std::pow(affineMatrix.at<double>(0, 0), 2) + std::pow(affineMatrix.at<double>(1, 0), 2));
+
 }
 
 //Metoda 13: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
-void alignImageTranslation(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+void alignImageTranslation(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Konwersja obrazów do odcieni szarości
     cv::Mat baseGray, srcGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -587,10 +625,13 @@ void alignImageTranslation(const cv::Mat& baseImage, const cv::Mat& srcImage, cv
 
     // Odkształcanie źródłowego obrazu
     cv::warpAffine(srcImage, result, translationMatrix, baseImage.size());
+    
+    
+    scale = 1.0f;
 }
 
 //Metoda 14: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
-void alignImageSimilarity(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+void alignImageSimilarity(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Konwersja obrazów do odcieni szarości
     cv::Mat baseGray, srcGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -635,10 +676,12 @@ void alignImageSimilarity(const cv::Mat& baseImage, const cv::Mat& srcImage, cv:
     // Obliczanie przesunięcia z macierzy podobieństwa
     shift.x = similarityMatrix.at<double>(0, 2);
     shift.y = similarityMatrix.at<double>(1, 2);
+    
+    scale = std::sqrt(std::pow(similarityMatrix.at<double>(0, 0), 2) + std::pow(similarityMatrix.at<double>(1, 0), 2));
 }
 
 //Metoda 15: https://github.com/abadams/ImageStack -> Alignment.cpp (Digest::align)
-void alignImageTransform(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift) {
+void alignImageTransform(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Konwersja obrazów do odcieni szarości
     cv::Mat baseGray, srcGray;
     cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
@@ -690,9 +733,25 @@ void alignImageTransform(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::
     // Odkształcanie źródłowego obrazu
     cv::warpPerspective(srcImage, result, perspectiveMatrix, baseImage.size());
 
+    // Określanie skali na podstawie przekształconych rogów obrazu
+    std::vector<cv::Point2f> srcCorners = { {0, 0}, {static_cast<float>(srcImage.cols), 0},
+                                            {static_cast<float>(srcImage.cols), static_cast<float>(srcImage.rows)}, {0, static_cast<float>(srcImage.rows)} };
+    std::vector<cv::Point2f> transformedCorners(4);
+    cv::perspectiveTransform(srcCorners, transformedCorners, perspectiveMatrix);
+
     // Przesunięcie na podstawie macierzy perspektywicznej (zakładając, że chodzi o translację)
     shift.x = perspectiveMatrix.at<double>(0, 2);
     shift.y = perspectiveMatrix.at<double>(1, 2);
+    
+    
+     // Obliczanie przeskalowania wzdłuż osi X i Y na podstawie odległości między przekształconymi rogami
+    float scaleX = std::sqrt(std::pow(transformedCorners[1].x - transformedCorners[0].x, 2) +
+                             std::pow(transformedCorners[1].y - transformedCorners[0].y, 2)) / srcImage.cols;
+    float scaleY = std::sqrt(std::pow(transformedCorners[2].x - transformedCorners[1].x, 2) +
+                             std::pow(transformedCorners[2].y - transformedCorners[1].y, 2)) / srcImage.rows;
+
+    // Przybliżona skala to średnia z obu osi
+    scale = (scaleX + scaleY) / 2.0f;
 }
 
 // Funkcja do kopiowania pliku
@@ -741,50 +800,51 @@ int main(int argc, char** argv) {
 
         cv::Mat result;
         cv::Point2f shift;
+        float scale = 1.0f;
         if (alignmentMethod == "-a1") {
-            alignImageORB(baseImage, srcImage, result, shift); // ORB feature-based alignment
+            alignImageORB(baseImage, srcImage, result, shift, scale); // ORB feature-based alignment
         } else if (alignmentMethod == "-a2") {
-            alignImagePhaseCorrelation(baseImage, srcImage, result, shift); // Phase correlation alignment
+            alignImagePhaseCorrelation(baseImage, srcImage, result, shift, scale); // Phase correlation alignment
         } else if (alignmentMethod == "-a3") {
-            alignImageFFT(baseImage, srcImage, result, shift); // FFT-based alignment
+            alignImageFFT(baseImage, srcImage, result, shift, scale); // FFT-based alignment
         } else if (alignmentMethod == "-a4") {
-            alignImageSIFT(baseImage, srcImage, result, shift); // SIFT-based alignment
+            alignImageSIFT(baseImage, srcImage, result, shift, scale); // SIFT-based alignment
         } else if (alignmentMethod == "-a5") {
-            alignImageByTemplateMatching(baseImage, srcImage, result, shift); // Template matching alignment
+            alignImageByTemplateMatching(baseImage, srcImage, result, shift, scale); // Template matching alignment
         } else if (alignmentMethod == "-a6") {
-            alignImageByCanny(baseImage, srcImage, result, shift); // Canny overlap-based alignment
+            alignImageByCanny(baseImage, srcImage, result, shift, scale); // Canny overlap-based alignment
         } else if (alignmentMethod == "-a7") {
-            alignImageByFFTAndCanny(baseImage, srcImage, result, shift);
+            alignImageByFFTAndCanny(baseImage, srcImage, result, shift, scale);
         } else if (alignmentMethod == "-a8") {
-            alignImageSIFTTranslationOnly(baseImage, srcImage, result, shift); 
+            alignImageSIFTTranslationOnly(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a9") {
-            alignImageSIFTNoFilter(baseImage, srcImage, result, shift);
+            alignImageSIFTNoFilter(baseImage, srcImage, result, shift, scale);
         } else if (alignmentMethod == "-a10") {
-            alignImagesECC(baseImage, srcImage, result, shift); 
+            alignImagesECC(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a11") {
-            alignImagesByPyramid(baseImage, srcImage, result, shift); 
+            alignImagesByPyramid(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a12") {
-            alignImageAffine(baseImage, srcImage, result, shift); 
+            alignImageAffine(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a13") {
-            alignImageTranslation(baseImage, srcImage, result, shift); 
+            alignImageTranslation(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a14") {
-            alignImageSimilarity(baseImage, srcImage, result, shift); 
+            alignImageSimilarity(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a15") {
-            alignImageTransform(baseImage, srcImage, result, shift); 
+            alignImageTransform(baseImage, srcImage, result, shift, scale); 
         } else {
             std::cerr << "Unknown alignment method!" << std::endl;
             return -1;
         }
         
         if(abs(shift.x) > MAX_OFFSET || abs(shift.y) > MAX_OFFSET){
-            std::cout << "Shift is too big: " << shift << std::endl;
+            std::cout << "Shift is too big. ";
         }
 
         // Zapisanie obrazu w tym samym katalogu co oryginalny plik
         std::string outputFilename = std::filesystem::path(srcFilePath).parent_path().string() + "/Aligned" + alignmentMethod + "." + std::filesystem::path(srcFilePath).filename().string();
         cv::imwrite(outputFilename, result);
         //std::cout << "Aligned image saved as " << outputFilename << std::endl;
-        std::cout << "Shift: " << shift << std::endl;
+        std::cout << "Shift: " << shift << ", Scale: " << scale << std::endl;
     }
 
     return 0;

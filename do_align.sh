@@ -32,7 +32,7 @@ process_directory() {
   #echo "Znalezione pliki: ${cut_files[@]}"  # Debugowanie: wyświetlenie znalezionych plików
 
   # Przetwarzanie metod od -a1 do -a6
-  for i in {11..11}; do
+  for i in {12..12}; do
     method="-a$i"
 
     # Ustawienie pliku początkowego dla tej metody
