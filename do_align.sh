@@ -18,7 +18,7 @@ process_directory() {
   fi
 
   # Znajdowanie plików *.cut.png w katalogu wip i sortowanie według naturalnych liczb (sort -V)
-  mapfile -t cut_files < <(find "$wip_dir" -name "*.cut.png" | sort -V)
+  mapfile -t cut_files < <(find "$wip_dir" -maxdepth 1 -name "*.cut.png" | sort -V)
 
   # Filtrowanie i ignorowanie plików zaczynających się od "Aligned"
   cut_files=("${cut_files[@]/*Aligned*/}")
@@ -32,7 +32,7 @@ process_directory() {
   #echo "Znalezione pliki: ${cut_files[@]}"  # Debugowanie: wyświetlenie znalezionych plików
 
   # Przetwarzanie metod od -a1 do -a6
-  for i in {12..12}; do
+  for i in {4,12,14}; do
     method="-a$i"
 
     # Ustawienie pliku początkowego dla tej metody

@@ -3,9 +3,21 @@
 #include <vector>
 #include <string>
 #include <filesystem>
+#include <atomic>
+#include <algorithm>
+#include <fstream>
+#include <thread>
+
 
 #define RECT_SIZE 50 // Rozmiar pola do analizy ostrości
 #define DILATION_ITER 5 // Ilość iteracji rozszerzenia maski
+
+#define NUM_LEVELS 5  // Liczba poziomów piramidy (met. 7)
+
+cv::Mat precomputedKernel;
+cv::Mat deviationResult;// = cv::Mat::zeros(rows, cols, CV_64F);  // Używamy CV_64F dla odchylenia
+cv::Mat entropyResult;// = cv::Mat::zeros(rows, cols, CV_64F);  // Używamy CV_64F dla odchylenia
+    
 
 /* TODO:
  * color normalisation! (https://github.com/PetteriAimonen/focus-stack/blob/master/src/task_align.cc)
@@ -410,62 +422,456 @@ cv::Mat stackWithFloatingMasks2(const std::vector<cv::Mat>& images, bool debug =
 
 //Metoda 7: na inspirowane (?) stack.py i utils.py, ale nie działa 
 // as in https://github.com/bznick98/Focus_Stacking (lap_focus_stacking) - NOT WORKING YET
-cv::Mat stackWithLaplacianPyramid(const std::vector<cv::Mat>& images, int N = 3) {
-    // Przechowuje obrazy Laplace'a
-    std::vector<cv::Mat> LP_f;
 
-    // Iteracja przez każdy obraz
-    for (const auto& img : images) {
-        // Zmiana formatu obrazu na float, aby zachować precyzję
-        cv::Mat imgFloat;
-        img.convertTo(imgFloat, CV_32F);
+void calculateDeviationAndEntropy(const cv::Mat& image, cv::Mat& deviations, cv::Mat& entropies, int kernel_size) {
+    // Obliczanie ilości piksli, które będą dodane jako padding
+    int pad_amount = (kernel_size - 1) / 2;
 
-        std::vector<cv::Mat> gaussianPyramid;
-        gaussianPyramid.push_back(imgFloat);
-
-        // Tworzenie piramidy Gaussa
-        for (int i = 0; i < N; ++i) {
-            cv::Mat down;
-            cv::pyrDown(gaussianPyramid[i], down);
-            gaussianPyramid.push_back(down);
-        }
-
-        // Tworzenie piramidy Laplace'a
-        for (int i = N; i > 0; --i) {
-            cv::Mat up;
-            cv::pyrUp(gaussianPyramid[i], up, gaussianPyramid[i - 1].size());
-            LP_f.push_back(gaussianPyramid[i - 1] - up);
-        }
-        // Ostatni poziom piramidy Gaussa
-        LP_f.push_back(gaussianPyramid.back());
+    // Sprawdzamy, czy obraz jest pusty
+    if (image.empty()) {
+        std::cerr << "Error: Image is empty.\n";
+        return;  // Zwracamy, jeśli obraz jest pusty
     }
 
-    // Fuzja obrazów Laplace'a
-    cv::Mat fused_img = cv::Mat::zeros(images[0].size(), images[0].type());
+    // Tworzenie obrazu z paddingiem (dodanie obramowania)
+    cv::Mat paddedImage;
+    cv::copyMakeBorder(image, paddedImage, pad_amount, pad_amount, pad_amount, pad_amount, cv::BORDER_REFLECT101);
 
-    // Dodaj wszystkie obrazy Laplace'a
-    for (const auto& laplacian : LP_f) {
-        // Sprawdź, czy rozmiar jest zgodny z fused_img
-        if (laplacian.size() == fused_img.size()) {
-            fused_img += laplacian;
-        } else {
-            std::cerr << "Rozmiary obrazów nie pasują: " 
-                      << laplacian.size() << " != " 
-                      << fused_img.size() << std::endl;
+    // Inicjalizowanie macierzy do przechowywania wyników odchyleń i entropii
+    //deviations.create(image.rows, image.cols, CV_64F); // Inicjalizujemy macierz dla odchyleń
+    //entropies.create(image.rows, image.cols, CV_64F);   // Inicjalizujemy macierz dla entropii
+
+    // Przechodzimy po każdym pikselu w oryginalnym obrazie
+    for (int row = pad_amount; row < paddedImage.rows - pad_amount; ++row) {
+        for (int col = pad_amount; col < paddedImage.cols - pad_amount; ++col) {
+            // Wybieramy region w paddingowanej macierzy, który odpowiada bieżącemu pikselowi
+            cv::Rect region(col - pad_amount, row - pad_amount, kernel_size, kernel_size);
+            cv::Mat area = paddedImage(region);  // Wyciągamy region z paddingowanego obrazu
+
+            // Obliczanie odchylenia standardowego
+            cv::Scalar mean, stddev;
+            cv::meanStdDev(area, mean, stddev);
+            //std::cout << "Deviations size: " << deviations.size() << ". Trying to write at " << row - pad_amount << "x" << col - pad_amount << std::endl;
+            deviations.at<double>(row - pad_amount, col - pad_amount) = stddev[0];
+            //std::cout << "ok1" << std::endl;
+
+            // Obliczanie histogramu dla regionu w celu obliczenia entropii
+            std::vector<int> hist(256, 0);  // Histogram dla 256 poziomów szarości
+            for (int i = 0; i < area.rows; ++i) {
+                for (int j = 0; j < area.cols; ++j) {
+                    int pixelValue = static_cast<int>(area.at<uchar>(i, j));
+                    hist[pixelValue]++;
+                }
+            }
+
+            // Obliczanie entropii dla danego regionu
+            double entropy_value = 0.0;
+            int areaSize = area.rows * area.cols;  // Liczba pikseli w regionie
+            for (int value : hist) {
+                if (value > 0) {
+                    double p = static_cast<double>(value) / areaSize;  // Prawdopodobieństwo danego poziomu szarości
+                    entropy_value -= p * std::log2(p);  // Obliczamy entropię
+                }
+            }
+
+            // Zapisujemy wynik entropii w odpowiedniej komórce macierzy entropii
+            entropies.at<double>(row - pad_amount, col - pad_amount) = entropy_value;
         }
     }
-
-    // Normalizacja do zakresu 0-255
-    cv::normalize(fused_img, fused_img, 0, 255, cv::NORM_MINMAX, CV_8U);
-
-    // Ulepszenie jasności
-    double alpha = 1.5; // Współczynnik kontrastu
-    int beta = 30;      // Wartość jasności
-    cv::Mat enhanced_img;
-    fused_img.convertTo(enhanced_img, CV_8U, alpha, beta); // Zastosowanie kontrastu i jasności
-
-    return enhanced_img;
 }
+
+void saveMatToTxt(const cv::Mat& mat, const std::string& filename) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Błąd przy otwieraniu pliku do zapisu: " << filename << std::endl;
+        return;
+    }
+
+    // Iteracja przez wszystkie elementy macierzy
+    for (int i = 0; i < mat.rows; i++) {
+        for (int j = 0; j < mat.cols; j++) {
+            // Zapisz element do pliku, rozdzielając spacje między wartościami
+            file << mat.at<float>(i, j);
+            if (j < mat.cols - 1) file << " ";
+        }
+        file << std::endl; // Nowa linia po każdym wierszu
+    }
+
+    file.close();
+    std::cout << "Zapisano macierz do pliku " << filename << std::endl;
+}
+
+// Funkcja do tworzenia fuzji na poziomie Laplace’a na podstawie lokalnego odchylenia i entropii
+cv::Mat computeLaplacianLayerFusion(const std::vector<cv::Mat>& laplacianLevelImages, int kernel_size) {
+    int rows = laplacianLevelImages[0].rows;
+    int cols = laplacianLevelImages[0].cols;
+    std::cout << "Making fusedLayer var... " << std::endl;
+
+    cv::Mat fusedLayer = cv::Mat::zeros(rows, cols, laplacianLevelImages[0].type());
+
+    std::cout << "Fusion: Image is " << rows << "x" << cols << std::endl;
+
+    std::cout << "ent " << std::endl;
+    std::vector<cv::Mat> entropies;
+    std::cout << "dev " << std::endl;
+    std::vector<cv::Mat> deviations;
+
+
+    // Inicjalizujemy macierze dla odchylenia i entropii z rozmiarami rows i cols
+    std::cout << "mk " << std::endl;
+    //deviationResult.release();
+    //deviationResult = cv::Mat::zeros(rows, cols, CV_64F);  // Używamy CV_64F dla odchylenia
+    //deviationResult = cv::Mat(rows, cols, CV_64F);
+    //cv::Mat deviationResult;// = cv::Mat::zeros(rows, cols, CV_64F, cv::Scalar(0));  // Używamy CV_64F dla odchylenia
+    //deviationResult.create(rows, cols, float);
+    std::cout << "mk " << std::endl;
+    //entropyResult.release();
+    //entropyResult = cv::Mat::zeros(rows, cols, CV_64F);  // Używamy CV_64F dla entropii
+    //entropyResult = cv::Mat(rows, cols, CV_64F, cv::Scalar(1));
+    std::cout << "ok" << std::endl;
+
+    // Obliczanie lokalnego odchylenia i entropii dla każdego obrazu na poziomie
+    int imNo = 0;
+    for (const auto& img : laplacianLevelImages) {
+        std::cout << "Dev & Ent." << std::endl;
+
+        //czyszczenie tych macierzy
+        std::cout << rows << "x" << cols << std::endl;
+        deviationResult = cv::Mat::zeros(rows, cols, CV_64F);  // Używamy CV_64F dla odchylenia
+        std::cout << "ok" << std::endl;
+        entropyResult = cv::Mat::zeros(rows, cols, CV_64F);  // Używamy CV_64F dla entropii
+        // Obliczamy odchylenie i entropię w jednym przebiegu
+        calculateDeviationAndEntropy(img, deviationResult, entropyResult, kernel_size);
+        std::cout << "ok" << std::endl;
+
+        // Dodajemy wyniki do wektorów
+        deviations.push_back(deviationResult.clone());
+        std::cout << "ok" << std::endl;
+        entropies.push_back(entropyResult.clone());
+
+        std::cout << "ok" << std::endl;
+        // Uzyskujemy rozmiary obrazów: oryginalnego obrazu, odchylenia i entropii
+        cv::Size imageSize = img.size();
+        cv::Size deviationSize = deviationResult.size();
+        cv::Size entropySize = entropyResult.size();
+
+        // Wyświetlamy rozmiary w jednym wierszu
+        std::cout << "Image " << imNo << ": "
+                << "Original Image Size = " << imageSize.width << "x" << imageSize.height << ", "
+                << "Deviation Size = " << deviationSize.width << "x" << deviationSize.height << ", "
+                << "Entropy Size = " << entropySize.width << "x" << entropySize.height
+                << std::endl;
+
+        // Dodajemy obliczone odchylenie i entropię do wyników
+//         deviations.push_back(deviationResult);
+//         entropies.push_back(entropyResult);
+
+        imNo++;  // Zwiększamy numer obrazu
+    }
+
+    // Iterujemy po wszystkich wierszach obrazu
+    int max_rows = rows;  // Użyj rozmiaru pierwszego obrazu jako odniesienia
+    int max_cols = cols;
+
+    for (int i = 0; i < max_rows; ++i) {
+        std::cout << i << " of " << max_rows << " rows." << std::endl;
+
+        for (int j = 0; j < max_cols; ++j) {
+            int D_max_idx = 0, E_max_idx = 0, D_min_idx = 0, E_min_idx = 0;
+            std::cout << "Ne";
+            double D_max = deviations[0].at<double>(i, j), E_max = entropies[0].at<double>(i, j);
+            std::cout <<"xt. ";
+            double D_min = D_max, E_min = E_max;
+
+            for (int k = 1; k < laplacianLevelImages.size(); ++k) {
+                if (deviations[k].rows <= i || deviations[k].cols <= j ||
+                    entropies[k].rows <= i || entropies[k].cols <= j ||
+                    laplacianLevelImages[k].rows <= i || laplacianLevelImages[k].cols <= j) {
+                    std::cerr << "Error: Index out of bounds at (i=" << i << ", j=" << j << ", k=" << k << ").\n";
+                    return fusedLayer;  // Wyjście z funkcji, aby zapobiec dalszym błędom
+                }
+
+                double D_val = deviations[k].at<double>(i, j);
+                double E_val = entropies[k].at<double>(i, j);
+
+                if (D_val > D_max) { D_max = D_val; D_max_idx = k; }
+                if (E_val > E_max) { E_max = E_val; E_max_idx = k; }
+                if (D_val < D_min) { D_min = D_val; D_min_idx = k; }
+                if (E_val < E_min) { E_min = E_val; E_min_idx = k; }
+
+            }
+
+            std::cout << "Dev: " << deviations[0].rows << "x" << deviations[0].cols << ", Entr: " << entropies[0].rows << "x" << entropies[0].cols
+                    << ", Image is " << rows << "x" << cols << ", calculating pixel: " << i << "x" << j
+                    << ": D_max_idx: " << D_max_idx << ", E_max_idx: " << E_max_idx
+                    << ", D_min_idx: " << D_min_idx << ", E_min_idx: " << E_min_idx;
+
+            if (fusedLayer.rows <= i || fusedLayer.cols <= j) {
+                std::cerr << "Error: `fusedLayer` index out of bounds at (i=" << i << ", j=" << j << ").\n";
+                return fusedLayer;
+            }
+
+            std::cout << " => option ";
+
+            if (D_max_idx == E_max_idx) {
+                fusedLayer.at<double>(i, j) = laplacianLevelImages[D_max_idx].at<double>(i, j);
+                std::cout << "1." << std::endl;
+            } else if (D_min_idx == E_min_idx) {
+                fusedLayer.at<double>(i, j) = laplacianLevelImages[D_min_idx].at<double>(i, j);
+                std::cout << "2." << std::endl;
+            } else {
+                double sum = 0.0;
+                for (int k = 0; k < laplacianLevelImages.size(); ++k) {
+                    sum += laplacianLevelImages[k].at<double>(i, j);
+                }
+                fusedLayer.at<double>(i, j) = sum / laplacianLevelImages.size();
+                std::cout << "3." << std::endl;
+            }
+        }
+    }
+
+//     deviations.clear() ;
+//     entropies.clear();
+//     deviationResult.deallocate();
+    std::cout << "Saving fusedLayer. Size: " << fusedLayer.size() << std::endl;
+    
+    saveMatToTxt(fusedLayer, "fus.txt");
+    
+    if (fusedLayer.type() != CV_8U) {
+        fusedLayer.convertTo(fusedLayer, CV_8U, 255.0);  // Skaluje wartości z 0-1 na 0-255
+    }
+    
+    std::cout << "ok1" << std::endl;
+
+    cv::imwrite("fus.png", fusedLayer.clone());
+    
+    std::cout << "ok2" << std::endl;
+
+    
+    return fusedLayer;
+}
+
+
+// // Funkcja, która oblicza nową warstwę Laplace’a dla danego poziomu (średnia)
+// cv::Mat computeLaplacianLayer(const std::vector<cv::Mat>& laplacianLevelImages) {
+//     // Zakładamy, że wszystkie obrazy mają ten sam rozmiar na danym poziomie
+//     cv::Mat result = cv::Mat::zeros(laplacianLevelImages[0].size(), laplacianLevelImages[0].type());
+//
+//     // Sumujemy wartości dla każdego obrazu na danym poziomie
+//     for (const auto& laplacianImage : laplacianLevelImages) {
+//         result += laplacianImage;
+//     }
+//
+//     // Średnia wartości, aby zachować odpowiednią intensywność
+//     result /= static_cast<double>(laplacianLevelImages.size());
+//     return result;
+// }
+
+// Funkcja do składania obrazów z piramidą Laplace’a
+cv::Mat stackWithLaplacianPyramidMono(const std::vector<cv::Mat>& monoImages) {
+    int factor = std::pow(2, NUM_LEVELS);
+
+    // Rozszerzamy każdy obraz do najbliższego rozmiaru podzielnego przez 2^{NUM_LEVELS}
+    std::vector<cv::Mat> extendedImages;
+    std::vector<cv::Size> originalSizes;
+    for (const auto& img : monoImages) {
+        originalSizes.push_back(img.size()); // Zapisujemy oryginalny rozmiar
+        int newRows = std::ceil(img.rows / static_cast<double>(factor)) * factor;
+        int newCols = std::ceil(img.cols / static_cast<double>(factor)) * factor;
+        cv::Mat extended;
+        cv::copyMakeBorder(img, extended, 0, newRows - img.rows, 0, newCols - img.cols, cv::BORDER_REFLECT);
+        extendedImages.push_back(extended);
+    }
+
+    // Piramidy Gaussa dla każdego obrazu
+    std::vector<std::vector<cv::Mat>> gaussianPyramids;
+    for (const auto& img : extendedImages) {
+        std::vector<cv::Mat> gaussianPyramid;
+        cv::Mat current = img;
+        gaussianPyramid.push_back(current);
+
+        // Tworzymy piramidę Gaussa o zdefiniowanej liczbie poziomów
+        for (int i = 0; i < NUM_LEVELS; ++i) {
+            cv::Mat down;
+            cv::pyrDown(current, down);
+            gaussianPyramid.push_back(down);
+            current = down;
+        }
+        gaussianPyramids.push_back(gaussianPyramid);
+    }
+
+    // Piramidy Laplace’a dla każdego obrazu
+    std::vector<std::vector<cv::Mat>> laplacianPyramids;
+    for (const auto& gaussianPyramid : gaussianPyramids) {
+        std::vector<cv::Mat> laplacianPyramid;
+        for (size_t i = 0; i < gaussianPyramid.size() - 1; ++i) {
+            cv::Mat up;
+            cv::pyrUp(gaussianPyramid[i + 1], up, gaussianPyramid[i].size());
+            cv::Mat laplacian = gaussianPyramid[i] - up;
+            laplacianPyramid.push_back(laplacian);
+        }
+        laplacianPyramid.push_back(gaussianPyramid.back());
+        laplacianPyramids.push_back(laplacianPyramid);
+    }
+
+    // Tworzymy nową piramidę Laplace’a przez średnią wartości na każdym poziomie
+    std::vector<cv::Mat> fusedLaplacianPyramid;
+    int numLevels = laplacianPyramids[0].size();
+    for (int level = 0; level < numLevels; ++level) {
+        std::cout << "Fusion level: " << level << " of " << numLevels << std::endl;
+        std::vector<cv::Mat> laplacianLevelImages;
+        for (const auto& laplacianPyramid : laplacianPyramids) {
+            laplacianLevelImages.push_back(laplacianPyramid[level]);
+        }
+        fusedLaplacianPyramid.push_back(computeLaplacianLayerFusion(laplacianLevelImages, 5).clone());
+    }
+
+    // Rekonstrukcja obrazu z piramidy Laplace’a
+    cv::Mat result = fusedLaplacianPyramid.back();
+    for (int level = fusedLaplacianPyramid.size() - 2; level >= 0; --level) {
+        cv::Mat up;
+        cv::pyrUp(result, up, fusedLaplacianPyramid[level].size());
+        result = up + fusedLaplacianPyramid[level];
+    }
+
+    // Przycinanie obrazu do pierwotnego rozmiaru
+    cv::Size originalSize = originalSizes[0];  // Zakładamy, że wszystkie obrazy mają ten sam pierwotny rozmiar
+    result = result(cv::Rect(0, 0, originalSize.width, originalSize.height));
+
+    return result;
+}
+
+
+// Funkcja stackWithLaplacianPyramid, która przyjmuje wektor obrazów wielokanałowych (kolorowych)
+cv::Mat stackWithLaplacianPyramid(const std::vector<cv::Mat>& images) {
+    // Sprawdzamy, czy lista obrazów nie jest pusta
+    if (images.empty()) {
+        throw std::invalid_argument("The input image list is empty.");
+    }
+    
+//     int cols = images[0].cols;
+//     int rows = images[0].rows;
+//     entropyResult = cv::Mat(rows, cols, CV_64F);
+//     deviationResult = cv::Mat(rows, cols, CV_64F);
+
+    // Wektor, który będzie przechowywał jednokanałowe wersje obrazów
+    std::vector<cv::Mat> monoImages;
+
+    // Konwertujemy każdy obraz na skalę szarości (jednokanałowy)
+    for (const auto& img : images) {
+        cv::Mat gray;
+        cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+        monoImages.push_back(gray);
+    }
+
+    // Wywołujemy stackWithLaplacianPyramidMono i zwracamy wynik
+    return stackWithLaplacianPyramidMono(monoImages);
+}
+
+///////////////////////////
+// cv::Mat stackWithLaplacianPyramid2(const std::vector<cv::Mat>& images) {
+//     int numImages = images.size();
+//
+//     if (numImages == 0) {
+//         throw std::invalid_argument("Input image vector is empty.");
+//     }
+//
+//     // Tworzymy wektor do przechowywania piramid Laplace'a
+//     std::vector<std::vector<cv::Mat>> laplacianPyramids(numImages);
+//
+//     // Dla każdego obrazu tworzymy piramidę Laplace'a
+//     for (int i = 0; i < numImages; ++i) {
+//         cv::Mat img = images[i];
+//
+//         // Tworzymy piramidę Gaussa
+//         std::vector<cv::Mat> gaussianPyramid;
+//         gaussianPyramid.push_back(img);
+//         cv::Mat currentImg = img;
+//
+//         for (int j = 0; j < 5; ++j) { // Możesz zmienić liczbę poziomów piramidy
+//             cv::Mat downsampled;
+//             cv::pyrDown(currentImg, downsampled);  // Próbkowanie w dół
+//             gaussianPyramid.push_back(downsampled);
+//             currentImg = downsampled;
+//         }
+//
+//         // Tworzymy piramidę Laplace'a dla tego obrazu
+//         std::vector<cv::Mat> laplacianPyramid;
+//         for (int j = 0; j < gaussianPyramid.size() - 1; ++j) {
+//             cv::Mat expanded;
+//             cv::pyrUp(gaussianPyramid[j + 1], expanded, gaussianPyramid[j].size());  // Rozciąganie
+//             cv::Mat laplacian = gaussianPyramid[j] - expanded;  // Laplacian
+//             laplacianPyramid.push_back(laplacian);
+//         }
+//
+//         // Ostatni poziom piramidy Gaussa jest samodzielny
+//         laplacianPyramid.push_back(gaussianPyramid.back());
+//
+//         // Dodajemy piramidę Laplace'a tego obrazu do wektora piramid
+//         laplacianPyramids[i] = laplacianPyramid;
+//     }
+//
+//     // Fuzja: dla każdego poziomu piramidy, wybieramy najlepszy obraz (najostrzejszy) z kanałów
+//     std::vector<cv::Mat> fusedPyramid;
+//     int numLevels = laplacianPyramids[0].size();  // Zakładamy, że wszystkie obrazy mają tę samą liczbę poziomów
+//
+//     for (int level = 0; level < numLevels; ++level) {
+//         cv::Mat fusedLevel = cv::Mat::zeros(laplacianPyramids[0][level].size(), laplacianPyramids[0][level].type());
+//
+//         // Łączymy obrazy na danym poziomie piramidy
+//         for (int i = 0; i < numImages; ++i) {
+//             fusedLevel += laplacianPyramids[i][level];
+//         }
+//
+//         // Normalizujemy wynik na poziomie (aby uzyskać poprawne jasności)
+//         fusedLevel /= numImages;
+//         fusedPyramid.push_back(fusedLevel);
+//     }
+//
+//     // Rekonstrukcja obrazu: budujemy obraz na podstawie piramidy Laplace'a dla każdego poziomu
+//     cv::Mat result = fusedPyramid.back();
+//     for (int level = fusedPyramid.size() - 2; level >= 0; --level) {
+//         cv::Mat expanded;
+//         cv::pyrUp(result, expanded, fusedPyramid[level].size());
+//         result = expanded + fusedPyramid[level];
+//     }
+//
+//     return result;
+// }
+//
+// // Nowa funkcja stackWithLaplacianPyramid
+// cv::Mat stackWithLaplacianPyramid(const std::vector<cv::Mat>& images) {
+//     if (images.empty()) {
+//         throw std::invalid_argument("Input image vector is empty.");
+//     }
+//
+//     std::vector<cv::Mat> blueChannelImages, greenChannelImages, redChannelImages;
+//
+//     // Rozdzielamy kanały dla każdego obrazu
+//     for (const auto& img : images) {
+//         std::vector<cv::Mat> channels(3);
+//         cv::split(img, channels); // Rozdzielamy na B, G, R
+//         blueChannelImages.push_back(channels[0]);
+//         greenChannelImages.push_back(channels[1]);
+//         redChannelImages.push_back(channels[2]);
+//     }
+//
+//     // Stosujemy stackWithLaplacianPyramid2 dla każdego kanału
+//     cv::Mat blueResult = stackWithLaplacianPyramid2(blueChannelImages);
+//     cv::Mat greenResult = stackWithLaplacianPyramid2(greenChannelImages);
+//     cv::Mat redResult = stackWithLaplacianPyramid2(redChannelImages);
+//
+//     // Łączymy kanały w jeden obraz kolorowy
+//     std::vector<cv::Mat> mergedChannels = {blueResult, greenResult, redResult};
+//     cv::Mat result;
+//     cv::merge(mergedChannels, result);
+//
+//     return result;
+// }
+
+
+//////////////////// koniec met 7.////////////////
+
 
 
 //Metoda 8:  
@@ -563,6 +969,599 @@ cv::Mat stackByAverage(const std::vector<cv::Mat>& images) {
 
 //Metoda 10: 
 
+// //niedoskonałe
+// //void normalizeImagesUsingMedian(std::vector<cv::Mat>& images) {
+// void normalizeImages(std::vector<cv::Mat>& images) {
+//     // Compute global median for each channel
+//     cv::Scalar globalMedian = cv::Scalar(0, 0, 0);
+//
+//     // Collect pixel values for each channel
+//     std::vector<std::vector<float>> channelValues(3);
+//
+//     for (const auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR); // Ensure 3-channel for uniformity
+//         }
+//
+//         // Collect pixel values for each channel
+//         std::vector<cv::Mat> channels(3);
+//         cv::split(img, channels);
+//         for (int c = 0; c < 3; ++c) {
+//             channels[c].reshape(1, 1).convertTo(channels[c], CV_32F);
+//             std::vector<float> values(channels[c].begin<float>(), channels[c].end<float>());
+//             channelValues[c].insert(channelValues[c].end(), values.begin(), values.end());
+//         }
+//     }
+//
+//     // Compute global median
+//     for (int c = 0; c < 3; ++c) {
+//         auto& values = channelValues[c];
+//         std::sort(values.begin(), values.end());
+//         size_t mid = values.size() / 2;
+//         globalMedian[c] = (values.size() % 2 == 0) ?
+//                            (values[mid - 1] + values[mid]) / 2.0 :
+//                            values[mid];
+//     }
+//
+//     // Normalize each image based on global median
+//     for (auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR);
+//         }
+//
+//         // Normalize each channel
+//         std::vector<cv::Mat> channels(3);
+//         cv::split(img, channels);
+//         for (int c = 0; c < 3; ++c) {
+//             channels[c].convertTo(channels[c], CV_32F);
+//             channels[c] -= globalMedian[c];  // Shift by global median
+//             cv::normalize(channels[c], channels[c], 0, 255, cv::NORM_MINMAX); // Normalize to [0, 255]
+//         }
+//
+//         // Merge channels back and clip values to valid range
+//         cv::Mat normalized;
+//         cv::merge(channels, normalized);
+//         normalized.convertTo(image, CV_8U);
+//     }
+// }
+
+
+// //szare
+// //void normalizeImagesUsingMedian(std::vector<cv::Mat>& images) {
+// void normalizeImages(std::vector<cv::Mat>& images) {
+//     // Compute global median and median absolute deviation (MAD) for each channel
+//     cv::Scalar globalMedian = cv::Scalar(0, 0, 0);
+//     cv::Scalar globalMAD = cv::Scalar(0, 0, 0);
+//
+//     // Collect pixel values for each channel
+//     std::vector<std::vector<float>> channelValues(3);
+//
+//     for (const auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR); // Ensure 3-channel for uniformity
+//         }
+//
+//         // Collect pixel values for each channel
+//         std::vector<cv::Mat> channels(3);
+//         cv::split(img, channels);
+//         for (int c = 0; c < 3; ++c) {
+//             channels[c].reshape(1, 1).copyTo(channelValues[c]);
+//         }
+//     }
+//
+//     // Compute global median and MAD
+//     for (int c = 0; c < 3; ++c) {
+//         auto& values = channelValues[c];
+//         std::sort(values.begin(), values.end());
+//         size_t mid = values.size() / 2;
+//         globalMedian[c] = (values.size() % 2 == 0) ?
+//                            (values[mid - 1] + values[mid]) / 2.0 :
+//                            values[mid];
+//
+//         // Compute MAD (Median Absolute Deviation)
+//         std::vector<float> deviations;
+//         deviations.reserve(values.size());
+//         for (float value : values) {
+//             deviations.push_back(std::abs(value - globalMedian[c]));
+//         }
+//
+//         std::sort(deviations.begin(), deviations.end());
+//         globalMAD[c] = (deviations.size() % 2 == 0) ?
+//                        (deviations[mid - 1] + deviations[mid]) / 2.0 :
+//                        deviations[mid];
+//     }
+//
+//     // Normalize each image to the global median and MAD
+//     for (auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR);
+//         }
+//
+//         // Normalize each channel
+//         std::vector<cv::Mat> channels(3);
+//         cv::split(img, channels);
+//         for (int c = 0; c < 3; ++c) {
+//             channels[c].convertTo(channels[c], CV_32F);
+//             channels[c] -= globalMedian[c];
+//             if (globalMAD[c] > 0.001) { // Avoid division by zero
+//                 channels[c] /= globalMAD[c];
+//             }
+//             channels[c] += globalMedian[c];
+//         }
+//
+//         // Merge channels back and clip values to valid range
+//         cv::Mat normalized;
+//         cv::merge(channels, normalized);
+//         normalized.convertTo(image, CV_8U);
+//     }
+// }
+
+//czerwone
+// //void normalizeImagesUsingMedian(std::vector<cv::Mat>& images) {
+// void normalizeImages(std::vector<cv::Mat>& images) {
+//     std::cout << "Normalizing images using median." << std::endl;
+//
+//     // Compute global median and median absolute deviation (MAD) for each channel
+//     cv::Scalar globalMedian = cv::Scalar(0, 0, 0);
+//     cv::Scalar globalMAD = cv::Scalar(0, 0, 0);
+//     int totalPixels = 0;
+//
+//     // Collect pixel values for each channel
+//     std::vector<std::vector<float>> channelValues(3);
+//
+//     for (const auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR); // Ensure 3-channel for uniformity
+//         }
+//
+//         // Collect pixel values for each channel
+//         std::vector<cv::Mat> channels(3);
+//         cv::split(img, channels);
+//         for (int c = 0; c < 3; ++c) {
+//             channelValues[c].insert(channelValues[c].end(),
+//                                     channels[c].begin<float>(), channels[c].end<float>());
+//         }
+//     }
+//
+//     // Compute global median and MAD
+//     for (int c = 0; c < 3; ++c) {
+//         std::vector<float>& values = channelValues[c];
+//
+//         // Sort values to compute the median
+//         std::sort(values.begin(), values.end());
+//         size_t mid = values.size() / 2;
+//         globalMedian[c] = (values.size() % 2 == 0) ?
+//                            (values[mid - 1] + values[mid]) / 2.0 :
+//                            values[mid];
+//
+//         // Compute MAD (Median Absolute Deviation)
+//         std::vector<float> deviations;
+//         deviations.reserve(values.size());
+//         for (float value : values) {
+//             deviations.push_back(std::abs(value - globalMedian[c]));
+//         }
+//
+//         std::sort(deviations.begin(), deviations.end());
+//         globalMAD[c] = (deviations.size() % 2 == 0) ?
+//                        (deviations[mid - 1] + deviations[mid]) / 2.0 :
+//                        deviations[mid];
+//     }
+//
+//     // Normalize each image to the global median and MAD
+//     for (auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR);
+//         }
+//
+//         // Normalize each channel
+//         std::vector<cv::Mat> channels(3);
+//         cv::split(img, channels);
+//         for (int c = 0; c < 3; ++c) {
+//             channels[c].convertTo(channels[c], CV_32F);
+//             channels[c] -= globalMedian[c];
+//             if (globalMAD[c] > 0.001) { // Avoid division by zero
+//                 channels[c] /= globalMAD[c];
+//             }
+//             channels[c] *= 128.0; // Scale to standard 0-255 range (optional)
+//             channels[c] += 128.0;
+//         }
+//
+//         // Merge channels back and clip values to valid range
+//         cv::Mat normalized;
+//         cv::merge(channels, normalized);
+//         normalized.convertTo(image, CV_8U, 1.0, 0.0); // Clip to valid range
+//     }
+//
+//     std::cout << "Done." << std::endl;
+// }
+
+
+//void normalizeImagesToGlobalMean(std::vector<cv::Mat>& images) {
+// void normalizeImages(std::vector<cv::Mat>& images) {
+//     // Compute global mean and standard deviation for each channel
+//     cv::Scalar globalMean = cv::Scalar(0, 0, 0);
+//     cv::Scalar globalStdDev = cv::Scalar(0, 0, 0);
+//     int totalPixels = 0;
+//
+//     for (const auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR); // Ensure 3-channel for uniformity
+//         }
+//         cv::Scalar mean, stddev;
+//         cv::meanStdDev(img, mean, stddev);
+//
+//         globalMean += mean * static_cast<double>(img.total());
+//         globalStdDev += stddev.mul(stddev) * static_cast<double>(img.total()); // Accumulate variance
+//         totalPixels += img.total();
+//     }
+//
+//     globalMean /= totalPixels; // Average mean
+//     globalStdDev = cv::Scalar(std::sqrt(globalStdDev[0] / totalPixels),
+//                               std::sqrt(globalStdDev[1] / totalPixels),
+//                               std::sqrt(globalStdDev[2] / totalPixels)); // Std deviation
+//
+//     // Normalize each image to the global mean and standard deviation
+//     for (auto& image : images) {
+//         cv::Mat img;
+//         if (image.channels() == 3) {
+//             img = image;
+//         } else {
+//             cv::cvtColor(image, img, cv::COLOR_GRAY2BGR);
+//         }
+//
+//         cv::Mat normalized;
+//         cv::Scalar mean, stddev;
+//         cv::meanStdDev(img, mean, stddev);
+//
+//         // Normalize each channel
+//         for (int i = 0; i < 3; ++i) {
+//             img.convertTo(normalized, CV_32F);
+//             normalized -= mean[i];
+//             if (stddev[i] > 0.001) { // Avoid division by zero
+//                 normalized /= stddev[i];
+//             }
+//             normalized *= globalStdDev[i];
+//             normalized += globalMean[i];
+//         }
+//
+//         // Clip values to valid range and convert back to the original format
+//         cv::Mat clipped;
+//         cv::normalize(normalized, clipped, 0, 255, cv::NORM_MINMAX, CV_8U);
+//         image = clipped;
+//     }
+// }
+
+
+//dużo szybsze niż void normalizeImagesUsingMedian, a równie niedoskonałe ;)
+// Function to normalize brightness of a group of images
+void normalizeImages(std::vector<cv::Mat>& images) {
+    double totalMeanBrightness = 0.0;
+    std::vector<double> imageBrightness(images.size());
+
+    // Calculate the mean brightness for each image and the total mean
+    for (size_t i = 0; i < images.size(); ++i) {
+        cv::Mat grayImage;
+        if (images[i].channels() == 3) {
+            cv::cvtColor(images[i], grayImage, cv::COLOR_BGR2GRAY);
+        } else {
+            grayImage = images[i];
+        }
+        imageBrightness[i] = cv::mean(grayImage)[0];
+        totalMeanBrightness += imageBrightness[i];
+    }
+
+    // Calculate the target brightness as the average brightness across all images
+    double targetBrightness = totalMeanBrightness / images.size();
+
+    // Adjust the brightness of each image to match the target brightness
+    for (size_t i = 0; i < images.size(); ++i) {
+        double brightnessFactor = targetBrightness / imageBrightness[i];
+
+        // Scale image intensities by the brightness factor
+        images[i].convertTo(images[i], -1, brightnessFactor, 0);
+    }
+}
+
+// // Funkcja normalizująca jasność i kontrast każdego obrazu
+// void normalizeImages(std::vector<cv::Mat>& images) {
+//     for (auto& image : images) {
+//         cv::normalize(image, image, 0, 255, cv::NORM_MINMAX);
+//
+//         if (image.channels() == 3) {
+//             cv::Mat imgYCrCb;
+//             cv::cvtColor(image, imgYCrCb, cv::COLOR_BGR2YCrCb);
+//             std::vector<cv::Mat> channels;
+//             cv::split(imgYCrCb, channels);
+//             cv::equalizeHist(channels[0], channels[0]);
+//             cv::merge(channels, imgYCrCb);
+//             cv::cvtColor(imgYCrCb, image, cv::COLOR_YCrCb2BGR);
+//         } else if (image.channels() == 1) {
+//             cv::equalizeHist(image, image);
+//         }
+//     }
+// }
+
+cv::Mat computeEntropy(const cv::Mat& image, int kernelSize) {
+    cv::Mat entropy = cv::Mat::zeros(image.size(), CV_64F);
+    int pad = kernelSize / 2;
+    cv::Mat paddedImage;
+    cv::copyMakeBorder(image, paddedImage, pad, pad, pad, pad, cv::BORDER_REFLECT101);
+
+    for (int y = pad; y < image.rows + pad; ++y) {
+        for (int x = pad; x < image.cols + pad; ++x) {
+            cv::Rect roi(x - pad, y - pad, kernelSize, kernelSize);
+            cv::Mat area = paddedImage(roi);
+            cv::Mat hist;
+            int histSize = 256;
+            float range[] = {0, 256};
+            const float* histRange = {range};
+            cv::calcHist(&area, 1, 0, cv::Mat(), hist, 1, &histSize, &histRange, true, false);
+
+            hist /= kernelSize * kernelSize;
+            double pixelEntropy = 0.0;
+            for (int i = 0; i < histSize; ++i) {
+                float p = hist.at<float>(i);
+                if (p > 0) pixelEntropy -= p * std::log2(p);
+            }
+            entropy.at<double>(y - pad, x - pad) = pixelEntropy;
+        }
+    }
+    return entropy;
+}
+
+cv::Mat computeDeviation(const cv::Mat& image, int kernelSize) {
+    cv::Mat deviation = cv::Mat::zeros(image.size(), CV_64F);
+    int pad = kernelSize / 2;
+    cv::Mat paddedImage;
+    cv::copyMakeBorder(image, paddedImage, pad, pad, pad, pad, cv::BORDER_REFLECT101);
+
+    for (int y = pad; y < image.rows + pad; ++y) {
+        for (int x = pad; x < image.cols + pad; ++x) {
+            cv::Rect roi(x - pad, y - pad, kernelSize, kernelSize);
+            cv::Mat area = paddedImage(roi);
+            double avg = cv::mean(area)[0];
+            double pixelDeviation = cv::sum((area - avg).mul(area - avg))[0] / area.total();
+            deviation.at<double>(y - pad, x - pad) = pixelDeviation;
+        }
+    }
+    return deviation;
+}
+
+cv::Mat calculateAverageNeighborhood(const cv::Mat& indexMatrix, int radius = 5) {
+    cv::Mat averagedMatrix;
+    // Define the kernel size as 2*radius + 1 to cover the neighborhood ± radius
+    int kernelSize = 2 * radius + 1;
+
+    // Use OpenCV's blur function to compute the mean over the neighborhood
+    cv::blur(indexMatrix, averagedMatrix, cv::Size(kernelSize, kernelSize));
+
+    // Convert the result to integer type if needed, rounding to the nearest integer
+    averagedMatrix.convertTo(averagedMatrix, CV_8U);  // Assumes indexMatrix is also 8-bit
+
+    return averagedMatrix;
+}
+
+// Function to fill 0-value pixels with the value of the nearest neighbor
+void fillZeroValues(cv::Mat& matrix) {
+    cv::Mat filledMatrix = matrix.clone();  // Make a copy for the output
+
+    // Define a queue to hold pixels to process, storing pixel coordinates (y, x)
+    std::queue<std::pair<int, int>> processingQueue;
+
+    // Initialize queue with all non-zero pixels
+    for (int y = 0; y < matrix.rows; ++y) {
+        for (int x = 0; x < matrix.cols; ++x) {
+            if (matrix.at<uchar>(y, x) != 0) {
+                processingQueue.push({y, x});
+            }
+        }
+    }
+
+    // Directions for 4-neighbor connectivity
+    const std::vector<std::pair<int, int>> directions = {{0, 1}, {1, 0}, {0, -1}, {-1, 0}};
+
+    // Perform BFS to fill in zero-value pixels
+    while (!processingQueue.empty()) {
+        auto [y, x] = processingQueue.front();
+        processingQueue.pop();
+
+        uchar fillValue = matrix.at<uchar>(y, x);
+
+        // Check all 4 neighbors
+        for (const auto& [dy, dx] : directions) {
+            int ny = y + dy;
+            int nx = x + dx;
+
+            // If within bounds and the neighbor is zero, fill it
+            if (ny >= 0 && ny < matrix.rows && nx >= 0 && nx < matrix.cols) {
+                if (matrix.at<uchar>(ny, nx) == 0) {
+                    filledMatrix.at<uchar>(ny, nx) = fillValue;
+                    matrix.at<uchar>(ny, nx) = fillValue;  // Update the original matrix to avoid reprocessing
+                    processingQueue.push({ny, nx});
+                }
+            }
+        }
+    }
+
+    // Copy back filled data to the original matrix
+    filledMatrix.copyTo(matrix);
+}
+
+void computeImageMetricsThread(
+    const cv::Mat& image,
+    cv::Mat& gray,
+    cv::Mat& entropy,
+    cv::Mat& deviation,
+    int kernelSize) {
+    cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    entropy = computeEntropy(gray, kernelSize);
+    deviation = computeDeviation(gray, kernelSize);
+}
+
+void computeImageMetricsParallel(
+    const std::vector<cv::Mat>& images,
+    std::vector<cv::Mat>& grayImages,
+    std::vector<cv::Mat>& entropyImages,
+    std::vector<cv::Mat>& deviationImages,
+    int kernelSize) {
+
+    grayImages.resize(images.size());
+    entropyImages.resize(images.size());
+    deviationImages.resize(images.size());
+
+    std::vector<std::thread> threads;
+    std::atomic<int> activeThreads(0);
+
+    for (size_t i = 0; i < images.size(); ++i) {
+        activeThreads.fetch_add(1, std::memory_order_relaxed); // Increment active thread count
+        threads.emplace_back([&, i]() {
+            computeImageMetricsThread(
+                std::cref(images[i]),
+                std::ref(grayImages[i]),
+                std::ref(entropyImages[i]),
+                std::ref(deviationImages[i]),
+                kernelSize);
+
+            // Decrement active thread count and display the remaining count
+            int remaining = activeThreads.fetch_sub(1, std::memory_order_relaxed) - 1;
+            std::cout << "Images left: " << remaining+1 << std::endl << std::flush;
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+}
+
+cv::Mat stackWithDeviationAndEntropy(const std::vector<cv::Mat>& images, int kernelSize = 5) {
+    if (images.empty()) {
+        std::cerr << "Błąd: Brak obrazów do przetworzenia." << std::endl;
+        return cv::Mat();
+    }
+
+    std::cout << "Normalizing images." << std::endl;
+    std::vector<cv::Mat> normalizedImages = images;
+    //its quite important since entropy and deviation depends on it.
+    normalizeImages(normalizedImages);
+    std::cout << "Done" << std::endl;
+
+
+    std::vector<cv::Mat> grayImages, entropyImages, deviationImages;
+
+    std::cout << "Calculating deviation and entropy." << std::endl;
+
+    //replacing image calculations one-by-one with parallel computing:
+    computeImageMetricsParallel(
+        normalizedImages,
+        grayImages,
+        entropyImages,
+        deviationImages,
+        kernelSize);
+
+//     int imNo = 1;
+//     std::vector<cv::Mat> grayImages, entropyImages, deviationImages;
+//     for (const auto& img : normalizedImages) {
+//         std::cout << "Calculating deviation and entropy for " << imNo << "/" << images.size() << std::endl;
+//         cv::Mat gray, entropy, deviation;
+//         cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+//         grayImages.push_back(gray);
+//         entropyImages.push_back(computeEntropy(gray, kernelSize));
+//         deviationImages.push_back(computeDeviation(gray, kernelSize));
+//         imNo++;
+//     }
+
+    std::cout << "Done." << std::endl;
+
+    int rows = normalizedImages[0].rows;
+    int cols = normalizedImages[0].cols;
+    cv::Mat indexMatrix = cv::Mat::zeros(rows, cols, CV_8U);  // Matrix to store 1-based indices
+    cv::Mat result = cv::Mat::zeros(rows, cols, normalizedImages[0].type());
+
+    // Step 1: Populate indexMatrix with the selected image indices
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            int D_max_idx = 0, E_max_idx = 0, D_min_idx = 0, E_min_idx = 0;
+            double D_max = -1, E_max = -1;
+            double D_min = std::numeric_limits<double>::max();
+            double E_min = std::numeric_limits<double>::max();
+
+            // Loop through each image to find max and min deviation and entropy
+            for (int i = 0; i < images.size(); ++i) {
+                double d = deviationImages[i].at<double>(y, x);
+                double e = entropyImages[i].at<double>(y, x);
+
+                if (d > D_max) { D_max = d; D_max_idx = i; }
+                if (e > E_max) { E_max = e; E_max_idx = i; }
+                if (d < D_min) { D_min = d; D_min_idx = i; }
+                if (e < E_min) { E_min = e; E_min_idx = i; }
+            }
+
+            // Determine the index for the selected image based on deviation and entropy criteria
+            if (D_max_idx == E_max_idx) {
+                indexMatrix.at<uchar>(y, x) = D_max_idx + 1;  // 1-based index
+            } else if (D_min_idx == E_min_idx) {
+                indexMatrix.at<uchar>(y, x) = D_min_idx + 1;  // 1-based index
+            } else {
+                indexMatrix.at<uchar>(y, x) = 0;  // No clear winner, set to 0
+            }
+        }
+    }
+
+    indexMatrix = calculateAverageNeighborhood(indexMatrix.clone(), 50);
+    fillZeroValues(indexMatrix);
+
+    // Step 2: Scale indexMatrix to fill the 0-255 range for better visualization
+    cv::Mat scaledIndexMatrix;
+    cv::normalize(indexMatrix, scaledIndexMatrix, 0, 255, cv::NORM_MINMAX, CV_8U);
+
+    // Step 3: Save scaledIndexMatrix as a grayscale image
+    cv::imwrite("indexMatrix.png", scaledIndexMatrix);
+
+    // Step 4: Create the result image based on indexMatrix
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            int idx = indexMatrix.at<uchar>(y, x);
+
+            if (idx > 0) {
+                // Use the pixel from the chosen image (idx - 1 to convert back to 0-based)
+                result.at<cv::Vec3b>(y, x) = normalizedImages[idx - 1].at<cv::Vec3b>(y, x);
+            } else {
+                // No clear winner; average all pixels at this position
+                cv::Vec3d averagePixel(0, 0, 0);
+                for (const auto& img : normalizedImages) {
+                    averagePixel += img.at<cv::Vec3b>(y, x);
+                }
+                result.at<cv::Vec3b>(y, x) = averagePixel / static_cast<double>(images.size());
+                std::cout << "Should be none!" << std::endl;
+            }
+        }
+    }
+
+    return result;
+}
+
+
 
 //Koniec METOD
 
@@ -634,12 +1633,33 @@ std::vector<cv::Mat> loadImagesFromDirectory(const std::string& dirPath, const s
             continue;
         }
         images.push_back(img);
-        filenames.push_back(filepath); // Zapisz nazwę pliku
-        std::cout << "Loaded image: " << filepath << std::endl;  // Wyświetl załadowany obraz
+        filenames.push_back(filepath); // Save filename
+        std::cout << "Loaded image: " << filepath << std::endl;  // Display loaded image
+    }
+
+    // Combine images with filenames in pairs
+    std::vector<std::pair<std::string, cv::Mat>> imagePairs;
+    for (size_t i = 0; i < images.size(); ++i) {
+        imagePairs.emplace_back(filenames[i], images[i]);
+    }
+
+    // Sort the pairs based on the filename
+    std::sort(imagePairs.begin(), imagePairs.end(),
+              [](const auto& a, const auto& b) {
+                  return a.first < b.first;
+              });
+
+    // Clear and refill the images and filenames vectors with sorted data
+    images.clear();
+    filenames.clear();
+    for (const auto& pair : imagePairs) {
+        filenames.push_back(pair.first);
+        images.push_back(pair.second);
     }
 
     return images;
 }
+
 
 // Funkcja do przetwarzania obrazów
 cv::Mat processImages(const std::vector<cv::Mat>& images, const std::string& method) {
@@ -652,7 +1672,8 @@ cv::Mat processImages(const std::vector<cv::Mat>& images, const std::string& met
     } else if (method == "-m3") {
         result = stackWithSharpnessMask(images);
     } else if (method == "-m4") {
-        result = stackWithRectangles(images);
+        std::cout << "Removed." << std::endl;
+        //result = stackWithRectangles(images);
     } else if (method == "-m5") {
         result = stackWithFloatingMasks(images);
     } else if (method == "-m6") {
@@ -663,6 +1684,8 @@ cv::Mat processImages(const std::vector<cv::Mat>& images, const std::string& met
         result = stackWithLaplacianPyramidShadow(images);
     } else if (method == "-m9") {
         result = stackByAverage(images);
+    } else if (method == "-m10") {
+        result = stackWithDeviationAndEntropy(images);
     } else {
         std::cerr << "Unknown method: " << method << std::endl;
         return cv::Mat();  // Zwróć pusty obraz w przypadku błędu
@@ -703,7 +1726,7 @@ void saveResult(const cv::Mat& result, const std::vector<std::string>& filenames
 
 int main(int argc, char** argv) {
     if (argc < 4) {
-        std::cerr << "Usage: ./stack -m1|-m2 -aX directory1 [directory2 ...]" << std::endl;
+        std::cerr << "Usage: ./stack -mX -aX directory1 [directory2 ...]" << std::endl;
         return -1;
     }
 

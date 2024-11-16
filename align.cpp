@@ -5,11 +5,13 @@
 
 /*
  * Based or inspired on:
- * https://github.com/bznick98/Focus_Stacking       2
- * https://github.com/cmcguinness/focusstack        2
- * https://github.com/PetteriAimonen/focus-stack    1
- * https://github.com/abadams/ImageStack            4 (met. 12-15)
- * https://github.com/maitek/image_stacking         2
+ * https://github.com/bznick98/Focus_Stacking       2               (m1, m4)
+ * https://github.com/cmcguinness/focusstack        2               (m1, m4)
+ * https://github.com/PetteriAimonen/focus-stack    1               (m10)
+ * https://github.com/abadams/ImageStack            4               (m12-15)
+ * https://github.com/maitek/image_stacking         2               (m1, m10)
+ * 
+ * best stack: bznick98
  */
 
 #include <opencv2/opencv.hpp>
@@ -754,6 +756,76 @@ void alignImageTransform(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::
     scale = (scaleX + scaleY) / 2.0f;
 }
 
+// Metoda 16: metoda 12 bez rotacji
+void alignImageTranslationScale(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
+    // Convert images to grayscale
+    cv::Mat baseGray, srcGray;
+    cv::cvtColor(baseImage, baseGray, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(srcImage, srcGray, cv::COLOR_BGR2GRAY);
+
+    // ORB feature detection and descriptor computation
+    cv::Ptr<cv::ORB> orb = cv::ORB::create();
+    std::vector<cv::KeyPoint> keypointsBase, keypointsSrc;
+    cv::Mat descriptorsBase, descriptorsSrc;
+    orb->detectAndCompute(baseGray, cv::noArray(), keypointsBase, descriptorsBase);
+    orb->detectAndCompute(srcGray, cv::noArray(), keypointsSrc, descriptorsSrc);
+
+    // Matching descriptors using BFMatcher
+    cv::BFMatcher matcher(cv::NORM_HAMMING);
+    std::vector<cv::DMatch> matches;
+    matcher.match(descriptorsBase, descriptorsSrc, matches);
+    std::sort(matches.begin(), matches.end());
+
+    // Keep only the best matches
+    const int numGoodMatches = matches.size() * 0.1;
+    matches.erase(matches.begin() + numGoodMatches, matches.end());
+
+    // Extract point locations from matches
+    std::vector<cv::Point2f> pointsBase, pointsSrc;
+    for (const auto& match : matches) {
+        pointsBase.push_back(keypointsBase[match.queryIdx].pt);
+        pointsSrc.push_back(keypointsSrc[match.trainIdx].pt);
+    }
+
+    // Estimate translation and scaling factors
+    cv::Point2f sumShift(0, 0);
+    float sumScale = 0.0f;
+
+    for (size_t i = 0; i < pointsBase.size(); ++i) {
+        sumShift += pointsBase[i] - pointsSrc[i];
+        sumScale += cv::norm(pointsBase[i]) / cv::norm(pointsSrc[i]);
+    }
+
+    // Compute average shift and scaling
+    shift = sumShift * (1.0f / pointsBase.size());
+    scale = sumScale / pointsBase.size();
+
+    // Construct transformation matrix
+    cv::Mat translationScaleMatrix = (cv::Mat_<double>(2, 3) << scale, 0, shift.x, 0, scale, shift.y);
+
+    // Warp the source image with translation and scaling only
+    cv::warpAffine(srcImage, result, translationScaleMatrix, baseImage.size());
+}
+
+// Funkcja normalizująca jasność i kontrast każdego obrazu
+void normalizeImage(cv::Mat& image) {
+    //for (auto& image : images) {
+        cv::normalize(image, image, 0, 255, cv::NORM_MINMAX);
+
+        if (image.channels() == 3) {
+            cv::Mat imgYCrCb;
+            cv::cvtColor(image, imgYCrCb, cv::COLOR_BGR2YCrCb);
+            std::vector<cv::Mat> channels;
+            cv::split(imgYCrCb, channels);
+            cv::equalizeHist(channels[0], channels[0]);
+            cv::merge(channels, imgYCrCb);
+            cv::cvtColor(imgYCrCb, image, cv::COLOR_YCrCb2BGR);
+        } else if (image.channels() == 1) {
+            cv::equalizeHist(image, image);
+        }
+    //}
+}
+
 // Funkcja do kopiowania pliku
 bool copyFile(const std::string& srcPath, const std::string& destPath) {
     try {
@@ -778,6 +850,8 @@ int main(int argc, char** argv) {
         std::cerr << "Error loading base image: " << argv[2] << std::endl;
         return -1;
     }
+    
+    normalizeImage(baseImage);
 
     // Przetwarzanie każdego obrazu
     for (int i = 3; i < argc; ++i) {
@@ -787,14 +861,18 @@ int main(int argc, char** argv) {
             std::cerr << "Error loading image: " << srcFilePath << std::endl;
             continue;
         }
+        
+        normalizeImage(srcImage);
 
         // Sprawdzanie, czy oba pliki są takie same
         if (std::filesystem::equivalent(argv[2], argv[i])) {
             // Kopiowanie pliku bez analizy
             std::string outputFilename = std::filesystem::path(srcFilePath).parent_path().string() + "/Aligned" + alignmentMethod + "." + std::filesystem::path(srcFilePath).filename().string();
-            if (copyFile(srcFilePath, outputFilename)) {
-                //std::cout << "Files are identical, copied to " << outputFilename << std::endl;
-            }
+//             if (copyFile(srcFilePath, outputFilename)) {
+//                 //std::cout << "Files are identical, copied to " << outputFilename << std::endl;
+//             }
+            
+            cv::imwrite(outputFilename, srcImage);
             continue;
         }
 
@@ -831,6 +909,8 @@ int main(int argc, char** argv) {
             alignImageSimilarity(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a15") {
             alignImageTransform(baseImage, srcImage, result, shift, scale); 
+        } else if (alignmentMethod == "-a16") {
+            alignImageTranslationScale(baseImage, srcImage, result, shift, scale);
         } else {
             std::cerr << "Unknown alignment method!" << std::endl;
             return -1;
