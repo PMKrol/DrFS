@@ -30,7 +30,7 @@ using namespace std;
 // Stałe do przetwarzania Canny
 const int CANNY_LOW = 50; // Próg dolny Canny
 const int CANNY_HIGH = 100; // Próg górny Canny
-const int MAX_OFFSET = 64; // Maksymalne przesunięcie w pikselach
+const int MAX_OFFSET = 512; // Maksymalne przesunięcie w pikselach
 const int SMALL_OFFSET = 10;
 
 // Method 1: ORB-based feature matching alignment
@@ -851,7 +851,7 @@ int main(int argc, char** argv) {
         return -1;
     }
     
-    normalizeImage(baseImage);
+    //normalizeImage(baseImage);
 
     // Przetwarzanie każdego obrazu
     for (int i = 3; i < argc; ++i) {
@@ -862,7 +862,7 @@ int main(int argc, char** argv) {
             continue;
         }
         
-        normalizeImage(srcImage);
+        //normalizeImage(srcImage);
 
         // Sprawdzanie, czy oba pliki są takie same
         if (std::filesystem::equivalent(argv[2], argv[i])) {

@@ -1,3 +1,7 @@
+/*
+ * compile: g++ -std=c++17 -o stack stack.cpp `pkg-config --cflags --libs opencv4`
+ */
+
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <vector>
@@ -7,11 +11,19 @@
 #include <algorithm>
 #include <fstream>
 #include <thread>
+#include <unordered_map>
 
+//met 11
+#define CANNY_THRESH1 100   // Dolny próg Canny'ego
+#define CANNY_THRESH2 150   // Górny próg Canny'ego
+#define CANNY_KERNEL 64
+#define CANNY_TRESHOLD 64
 
+//
 #define RECT_SIZE 50 // Rozmiar pola do analizy ostrości
 #define DILATION_ITER 5 // Ilość iteracji rozszerzenia maski
 
+//met. 7
 #define NUM_LEVELS 5  // Liczba poziomów piramidy (met. 7)
 
 cv::Mat precomputedKernel;
@@ -1561,6 +1573,440 @@ cv::Mat stackWithDeviationAndEntropy(const std::vector<cv::Mat>& images, int ker
     return result;
 }
 
+//Metoda 11: jak 10, tylko na podstawie canny
+cv::Mat calculateMostFrequentNeighborhood(const cv::Mat& indexMatrix, int radius = 5) {
+    cv::Mat resultMatrix = indexMatrix.clone();  // Create a copy of the input matrix
+
+    // Define the kernel size as 2*radius + 1 to cover the neighborhood ± radius
+    int kernelSize = 2 * radius + 1;
+
+    // Iterate over each pixel in the matrix (skipping the borders)
+    for (int y = radius; y < indexMatrix.rows - radius; ++y) {
+        for (int x = radius; x < indexMatrix.cols - radius; ++x) {
+            // Create a map to store the frequency of each value in the neighborhood
+            std::unordered_map<int, int> frequencyMap;
+
+            // Traverse the neighborhood within the kernel size
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    int value = indexMatrix.at<uchar>(y + dy, x + dx);  // Get the pixel value
+                    frequencyMap[value]++;  // Increment the frequency of this value
+                }
+            }
+
+            // Find the most frequent value in the map
+            int mostFrequentValue = -1;
+            int maxFrequency = 0;
+
+            for (const auto& pair : frequencyMap) {
+                if (pair.second > maxFrequency) {
+                    mostFrequentValue = pair.first;
+                    maxFrequency = pair.second;
+                }
+            }
+
+            // Set the result matrix pixel to the most frequent value
+            resultMatrix.at<uchar>(y, x) = static_cast<uchar>(mostFrequentValue);
+        }
+    }
+
+    return resultMatrix;
+}
+
+void normalizeAndThreshold(cv::Mat& edgeSumImage) {
+    // Sprawdzenie, czy macierz jest odpowiedniego typu
+    if (edgeSumImage.type() != CV_8U) {
+        std::cerr << "Macierz musi być typu CV_8U!" << std::endl;
+        return;
+    }
+
+    // Znalezienie minimalnej i maksymalnej wartości w obrazie
+    double minVal, maxVal;
+    cv::minMaxLoc(edgeSumImage, &minVal, &maxVal);  // minVal i maxVal to wartości minimalne i maksymalne w obrazie
+
+    // Rozciągamy wartości na zakres 0-255
+    cv::Mat normalizedImage = edgeSumImage.clone();
+    normalizedImage.convertTo(normalizedImage, CV_8U, 255.0 / (maxVal - minVal), -minVal * 255.0 / (maxVal - minVal));
+
+    // Przycinamy wartości mniejsze niż próg THRESHOLD_VALUE
+    for (int y = 0; y < normalizedImage.rows; ++y) {
+        for (int x = 0; x < normalizedImage.cols; ++x) {
+            if (normalizedImage.at<uchar>(y, x) < CANNY_TRESHOLD) {
+                normalizedImage.at<uchar>(y, x) = 0;  // Ustawiamy piksel na 0, jeśli jest poniżej progu
+            }
+        }
+    }
+
+    // Przypisanie wyniku do oryginalnego obrazu
+    edgeSumImage = normalizedImage.clone();
+}
+
+void computeImageMetricsParallelCanny(
+    const std::vector<cv::Mat>& normalizedImages,
+    int kernelSize,
+    std::vector<cv::Mat>& cannyWeight) {  // Use cv::Mat for image storage
+
+    // Przygotowanie wektorów wynikowych
+    std::vector<cv::Mat> grayImages(normalizedImages.size());
+    std::vector<cv::Mat> cannyImages(normalizedImages.size());
+    std::vector<cv::Mat> edgeSumImages(normalizedImages.size());
+
+    // Użycie zmiennej do synchronizacji wątków
+    std::vector<std::thread> threads;
+    std::atomic<int> activeThreads(0);
+
+    // Inicjalizacja cannyWeight dla każdego obrazu (wektor obrazów, nie zmiennych)
+    cannyWeight.resize(normalizedImages.size());  // Resize to hold cv::Mat, not float
+
+    //way faster than for-for.
+    for (size_t i = 0; i < normalizedImages.size(); ++i) {
+        // Krok 1: Konwersja na obraz w skali szarości
+        cv::cvtColor(normalizedImages[i], grayImages[i], cv::COLOR_BGR2GRAY);
+
+        // Krok 2: Wykonanie Canny'ego
+        cv::Canny(grayImages[i], cannyImages[i], CANNY_THRESH1, CANNY_THRESH2);
+
+        // Krok 3: Obliczanie sumy krawędzi w otoczeniu piksela
+        edgeSumImages[i] = cv::Mat::zeros(cannyImages[i].size(), CV_32F);  // Obraz na wynik sumy krawędzi
+
+        // TODO sprawdzić GaussianBlur
+        // Zastosowanie blura (rozmycia) do obrazu krawędziowego
+        cv::blur(cannyImages[i], edgeSumImages[i], cv::Size(kernelSize, kernelSize));
+
+        normalizeAndThreshold(edgeSumImages[i]);
+        
+        // Zapisujemy wynik w wektorze cannyWeight, gdzie każdy element jest obrazem Canny'ego
+        cannyWeight[i] = edgeSumImages[i];  // Assign the sum of edges (Mat)
+
+        std::cout << "Processing image " << i + 1 << " of " << normalizedImages.size() << std::endl;
+    }
+    
+    std::cout << "Typ danych norm: " << normalizedImages[0].type() << std::endl;
+    std::cout << "Typ danych norm: " << grayImages[0].type() << std::endl;
+    std::cout << "Typ danych norm: " << cannyImages[0].type() << std::endl;
+    std::cout << "Typ danych norm: " << edgeSumImages[0].type() << std::endl;
+
+//     for (size_t i = 0; i < normalizedImages.size(); ++i) {
+//         activeThreads.fetch_add(1, std::memory_order_relaxed); // Zwiększenie liczby aktywnych wątków
+//         threads.emplace_back([&, i]() {
+//             // Krok 1: Konwersja na obraz w skali szarości
+//             cv::cvtColor(normalizedImages[i], grayImages[i], cv::COLOR_BGR2GRAY);
+//
+//             // Krok 2: Wykonanie Canny'ego
+//             cv::Canny(grayImages[i], cannyImages[i], CANNY_THRESH1, CANNY_THRESH2);
+//
+//             // Krok 3: Obliczanie sumy krawędzi w otoczeniu piksela
+//             edgeSumImages[i] = cv::Mat::zeros(cannyImages[i].size(), CV_32F);  // Obraz na wynik sumy krawędzi
+//             //float totalEdgeWeight = 0.0f;
+//
+// //             int halfKernel = kernelSize / 2;
+// //             for (int y = halfKernel; y < cannyImages[i].rows - halfKernel; ++y) {
+// //                 for (int x = halfKernel; x < cannyImages[i].cols - halfKernel; ++x) {
+// //                     // Sumowanie liczby pikseli krawędzi w kwadracie otaczającym piksel (x, y)
+// //                     float sum = 0.0f;
+// //                     for (int ky = -halfKernel; ky <= halfKernel; ++ky) {
+// //                         for (int kx = -halfKernel; kx <= halfKernel; ++kx) {
+// //                             // Sprawdzamy, czy piksel należy do krawędzi (ma wartość 255)
+// //                             if (cannyImages[i].at<uchar>(y + ky, x + kx) == 255) {
+// //                                 sum += 1;  // Zwiększ sumę, jeśli piksel to krawędź
+// //                             }
+// //                         }
+// //                     }
+// //                     edgeSumImages[i].at<float>(y, x) = sum;
+// //
+// //                     // Zliczanie sumy wartości krawędzi w obrazie
+// //                     //totalEdgeWeight += sum;
+// //                 }
+// //             }
+//
+//             cv::blur(cannyImages[i], edgeSumImages[i], cv::Size(kernelSize, kernelSize));
+//
+//             // Zapisujemy wynik w wektorze cannyWeight, gdzie każdy element jest obrazem Canny'ego
+//             cannyWeight[i] = edgeSumImages[i];  // Assign the sum of edges (Mat)
+//
+//             // Decrement active thread count
+//             int remaining = activeThreads.fetch_sub(1, std::memory_order_relaxed) - 1;
+//             std::cout << "Images left: " << remaining + 1 << std::endl << std::flush;
+//         });
+//     }
+//
+//     // Czekanie na zakończenie wszystkich wątków
+//     for (auto& thread : threads) {
+//         thread.join();
+//     }
+
+    // Po zakończeniu funkcji `cannyWeight` będzie zawierać zaktualizowane obrazy dla każdego obrazu
+}
+
+
+void saveMatToTextFile(const cv::Mat& mat, const std::string& filename) {
+    // Sprawdzamy, czy macierz jest jednowymiarowa (np. 1xN lub Nx1)
+    if (mat.empty()) {
+        std::cerr << "Mat is empty!" << std::endl;
+        return;
+    }
+
+    // Otwieramy plik do zapisu
+    std::ofstream outFile(filename);
+    if (!outFile.is_open()) {
+        std::cerr << "Failed to open file for writing: " << filename << std::endl;
+        return;
+    }
+
+    // Iterujemy po wszystkich elementach macierzy i zapisujemy je do pliku
+    for (int i = 0; i < mat.total(); ++i) {
+        outFile << mat.at<float>(i);  // Zapisujemy wartość (można dostosować typ do swoich potrzeb, np. uchar)
+        
+        // Dodajemy separator (spacja lub tabulator)
+        if (i < mat.total() - 1) {
+            outFile << " ";  // Spacja jako separator
+        }
+    }
+
+    outFile.close();
+    std::cout << "Mat was saved to " << filename << std::endl;
+}
+
+void replaceZerosWithMostFrequentValue(cv::Mat& indexMatrix, int maxIterations = 100) {
+    // Sprawdzenie, czy macierz jest odpowiedniego typu
+    if (indexMatrix.type() != CV_8U) {
+        std::cerr << "Macierz musi być typu CV_8U!" << std::endl;
+        return;
+    }else{
+        std::cout << "Macierz ok." << std::endl;
+    }
+
+    int rows = indexMatrix.rows;
+    int cols = indexMatrix.cols;
+
+    // Macierz pomocnicza do przechowywania nowych wartości
+    cv::Mat newIndexMatrix = indexMatrix.clone();
+
+    // Iteracje przetwarzania
+    for (int iteration = 0; iteration < maxIterations; ++iteration) {
+        bool changed = false;
+        std::cout << "It1." << std::endl;
+
+        // Przechodzimy przez każdy piksel
+        for (int y = 1; y < rows - 1; ++y) {  // Od 1 do rows-1, żeby uniknąć brzegów
+            for (int x = 1; x < cols - 1; ++x) {  // Od 1 do cols-1, żeby uniknąć brzegów
+                //std::cout << std::to_string(indexMatrix.at<uchar>(y, x)) << std::endl;
+            
+                if (indexMatrix.at<uchar>(y, x) == 0) {
+                    
+                    //std::cout << "0" << std::endl;
+                    std::map<int, int> valueCount;  // Mapa do zliczania wartości w sąsiedztwie
+
+                    // Zliczanie wartości w sąsiedztwie 3x3 (okno wokół piksela)
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            int neighborValue = indexMatrix.at<uchar>(y + dy, x + dx);
+                            if (neighborValue != 0) {  // Pomijamy wartość 0, bo to jest aktualizowany piksel
+                                valueCount[neighborValue]++;
+                            }
+                        }
+                    }
+
+                    // Szukamy wartości, która występuje najczęściej
+                    int mostFrequentValue = -1;
+                    int maxCount = -1;
+                    for (const auto& entry : valueCount) {
+                        if (entry.second > maxCount) {
+                            maxCount = entry.second;
+                            mostFrequentValue = entry.first;
+                        }
+                    }
+
+                    // Jeśli znaleziono najczęściej występującą wartość, zapisujemy ją do macierzy pomocniczej
+                    if (mostFrequentValue != -1) {
+                        newIndexMatrix.at<uchar>(y, x) = mostFrequentValue;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // Jeśli nic się nie zmieniło, kończymy iterację
+        if (!changed) {
+            break;
+        }else{
+            std::cout << "Found zeros..." << std::endl;
+        }
+
+        // Zastosowanie nowych wartości z macierzy pomocniczej do głównej macierzy
+        indexMatrix = newIndexMatrix.clone();
+    }
+}
+
+
+cv::Mat stackWithCanny(const std::vector<cv::Mat>& images, const std::string& output_dir = "./", int kernelSize = 50){
+    if (images.empty()) {
+        std::cerr << "Błąd: Brak obrazów do przetworzenia." << std::endl;
+        return cv::Mat();
+    }
+
+    std::cout << "Normalizing images." << std::endl;
+    std::vector<cv::Mat> normalizedImages = images;
+    normalizeImages(normalizedImages);
+    std::cout << "Done" << std::endl;
+
+    int rows = normalizedImages[0].rows;
+    int cols = normalizedImages[0].cols;
+
+    std::vector<cv::Mat> cannyWeight;
+    std::cout << "Calculating cannyWeight." << std::endl;
+
+    computeImageMetricsParallelCanny(normalizedImages, kernelSize, cannyWeight);
+
+    for (int i = 0; i < cannyWeight.size(); ++i) {
+        std::cout << normalizedImages[i].size() << " vs " << cannyWeight[i].size() << std::endl;
+
+        //std::cout << "Saving " << i << "dbg txt." << std::endl;
+        //saveMatToTextFile(cannyWeight[i], output_dir + "/dbg_canny-" + std::to_string(i) + ".txt");
+
+        std::cout << "Saving " << i << "dbg image." << std::endl;
+        cv::imwrite(output_dir + "/dbg_matrixCanny" + std::to_string(i) + ".png", cannyWeight[i]);
+    }
+
+    std::cout << "Done." << std::endl;
+
+    cv::Mat indexMatrix = cv::Mat::zeros(rows, cols, CV_8U);
+    
+//     for(int x = 0; x < 1000; ++x){
+//         std::cout << cannyWeight[0].at<float>(200, x) << " ";
+//     }
+/*    
+    std::cout  << std::endl;
+
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            int max_idx = 0;
+            double max_value = 0;
+
+            for (int i = 0; i < cannyWeight.size(); ++i) {
+                double current_value = cannyWeight[i].at<uchar>(y, x);
+                if (current_value > max_value) {
+                    max_value = current_value;
+                    max_idx = i;
+                }
+            }
+            
+            if(max_value == 0){
+                indexMatrix.at<int>(y, x) = 0;
+            }else{
+                indexMatrix.at<int>(y, x) = max_idx + 1;
+            }
+        }
+    }*/
+
+    // Tworzenie indexMatrix na podstawie wartości Canny
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            int max_idx = 0;
+
+            //          !!! TODO: if all zeros!     !!
+            double max_value = 0.0;
+
+            for (int i = 0; i < cannyWeight.size(); ++i) {
+                double canny_value = cannyWeight[i].at<uchar>(y, x);
+                if (canny_value > max_value) {
+                    max_value = canny_value;
+                    max_idx = i;
+                }
+            }
+
+            if (max_value == 0.0) {
+                // Obsługuje przypadek, gdy wszystkie wartości w cannyWeight[i] są zerowe
+                indexMatrix.ptr<uchar>(y)[x] = 0;  // Możesz ustawić 0, jeśli chcesz oznaczyć brak krawędzi
+            } else {
+                indexMatrix.ptr<uchar>(y)[x] = max_idx + 1;  // Indeksowanie 1-based
+            }
+        }
+    }
+
+//     cv::Mat indexMatrix = cv::Mat::zeros(rows, cols, CV_8U);  // Tworzymy macierz indeksów o rozmiarze (rows x cols)
+//
+//     // Tworzenie indexMatrix na podstawie wartości Canny
+//     for (int y = 0; y < rows; ++y) {
+//         for (int x = 0; x < cols; ++x) {
+//             int max_idx = 0;  // Zmienna do przechowywania indeksu największej wartości
+//             int max_value = -1;  // Ustawiamy maksymalną wartość na -1, co oznacza brak krawędzi
+//
+//             // Iterowanie po wszystkich obrazach krawędzi (cannyWeight)
+//             for (int i = 0; i < cannyWeight.size(); ++i) {
+//                 int canny_value = static_cast<int>(cannyWeight[i].at<float>(y, x));  // Pobieramy wartość dla piksela (y, x), konwertując na int
+//
+//                 // Jeśli wartość jest większa od max_value, aktualizujemy max_value i max_idx
+//                 if (canny_value > max_value) {
+//                     max_value = canny_value;
+//                     max_idx = i;
+//                 }
+//             }
+//
+//             // Jeśli max_value pozostaje na -1, przypisujemy wartość 0 (brak krawędzi)
+//             if (max_value == -1) {
+//                 indexMatrix.at<uchar>(y, x) = 0;  // Brak krawędzi
+//             } else {
+//                 indexMatrix.at<uchar>(y, x) = max_idx + 1;  // Indeksowanie 1-based, inne wartości krawędzi
+//             }
+//         }
+//     }
+
+    //std::cout << "Done0." << std::endl;
+
+    //std::cout << indexMatrix.size() << std::endl;
+    
+    // Zapis do pliku tekstowego (debugging)
+    saveMatToTextFile(indexMatrix, output_dir + "/dbg_indexMatrix.txt");
+    cv::imwrite(output_dir + "/dbg_indexMatrixCanny.png", indexMatrix);
+
+    std::cout << "Done1." << std::endl;
+    //solve zeros:
+    //indexMatrix = calculateAverageNeighborhood(indexMatrix.clone(), 50);
+    //indexMatrix = calculateMostFrequentNeighborhood(indexMatrix.clone(), CANNY_KERNEL);
+    
+    //replaceZerosWithMostFrequentValue(indexMatrix);
+    fillZeroValues(indexMatrix);
+    cv::imwrite(output_dir + "/dbg_indexMatrixFilled.png", indexMatrix);
+
+    // Naprawiona normalizacja i zapis
+    cv::Mat scaledIndexMatrix;
+    cv::normalize(indexMatrix, scaledIndexMatrix, 0, 255, cv::NORM_MINMAX, CV_8U);
+
+    cv::imwrite(output_dir + "/dbg_indexMatrixNorm.png", scaledIndexMatrix);
+
+    // Debugowanie: zapis nieskalowanej macierzy
+    //cv::imwrite("indexMatrixCannyUnscaled.png", indexMatrix);
+    //std::cout << "Done2." << std::endl;
+
+    std::cout << "Done3." << std::endl;
+    // Zapis macierzy znormalizowanej
+    //cv::imwrite(output_dir + "/dbg_indexMatrixCannyNorm.png", scaledIndexMatrix);
+    
+    //std::cout << "Done3." << std::endl;
+
+    // Tworzenie obrazu wynikowego
+    cv::Mat result = cv::Mat::zeros(rows, cols, normalizedImages[0].type());
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            int idx = indexMatrix.at<uchar>(y, x);
+            if (idx > 0) {
+                result.at<cv::Vec3b>(y, x) = normalizedImages[idx - 1].at<cv::Vec3b>(y, x);
+            } else {
+                cv::Vec3d averagePixel(0, 0, 0);
+                for (const auto& img : normalizedImages) {
+                    averagePixel += img.at<cv::Vec3b>(y, x);
+                }
+                result.at<cv::Vec3b>(y, x) = averagePixel / static_cast<double>(images.size());
+                //TODO
+                //std::cout << "Should be none." <<std::endl;
+            }
+        }
+    }
+
+    return result;
+}
+
 
 
 //Koniec METOD
@@ -1662,7 +2108,7 @@ std::vector<cv::Mat> loadImagesFromDirectory(const std::string& dirPath, const s
 
 
 // Funkcja do przetwarzania obrazów
-cv::Mat processImages(const std::vector<cv::Mat>& images, const std::string& method) {
+cv::Mat processImages(const std::vector<cv::Mat>& images, const std::string& method, const std::string& output_dir = "") {
     cv::Mat result;
 
     if (method == "-m1") {
@@ -1686,6 +2132,8 @@ cv::Mat processImages(const std::vector<cv::Mat>& images, const std::string& met
         result = stackByAverage(images);
     } else if (method == "-m10") {
         result = stackWithDeviationAndEntropy(images);
+    } else if (method == "-m11") {
+        result = stackWithCanny(images, output_dir, CANNY_KERNEL);
     } else {
         std::cerr << "Unknown method: " << method << std::endl;
         return cv::Mat();  // Zwróć pusty obraz w przypadku błędu
@@ -1759,7 +2207,7 @@ int main(int argc, char** argv) {
         }
 
         // Przetwarzanie obrazów
-        cv::Mat result = processImages(images, method);
+        cv::Mat result = processImages(images, method, dirPath + "/wip");
 
         if (result.empty()) {
             std::cerr << "Failed to stack images in directory: " << dirPath << std::endl;
