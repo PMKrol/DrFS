@@ -1,13 +1,20 @@
 /*
- * compile: g++ -std=c++17 -o cut cut.cpp `pkg-config --cflags --libs opencv4`
+ * compile: g++ -std=c++17 -o cut cut.cpp `pkg-config --cflags --libs opencv4` -lexiv2
  * run: ./cut 1680,300,1750,1750 0002/
+ * 
+ * sudo apt-get install libexiv2-dev
+
  */
 
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <filesystem>
+#include <exiv2/exiv2.hpp>
 
 namespace fs = std::filesystem;
+
+using namespace cv;
+using namespace std;
 
 std::string formatFilename(const std::string& filename) {
     std::string formattedName = filename;
@@ -38,6 +45,46 @@ void processImage(const std::string& filePath, const cv::Rect& roi) {
     if (image.empty()) {
         std::cerr << "Błąd: Nie można wczytać obrazu " << filePath << std::endl;
         return;
+    }
+    
+        // Odczyt EXIF z pliku
+    Exiv2::Image::AutoPtr imageFile = Exiv2::ImageFactory::open(filePath);
+    if (!imageFile.get()) {
+        std::cerr << "Błąd: Nie udało się otworzyć pliku EXIF: " << filePath << std::endl;
+        return;
+    }
+
+    // Próbujemy wczytać dane EXIF
+    imageFile->readMetadata();
+    Exiv2::ExifData& exifData = imageFile->exifData();
+
+    // Sprawdzamy, czy dane EXIF zostały wczytane
+    if (exifData.empty()) {
+        std::cerr << "Błąd: Brak danych EXIF w pliku: " << filePath << std::endl;
+        return;
+    }
+
+    // Sprawdzenie orientacji EXIF
+    int orientation = 1;  // Domyślnie ustawiamy na 1 (brak obrotu)
+    Exiv2::ExifKey key("Exif.Image.Orientation");
+
+    // Sprawdzenie, czy istnieje klucz orientacji w EXIF
+    Exiv2::ExifData::const_iterator pos = exifData.findKey(key);
+    if (pos != exifData.end()) {
+        // Jeśli klucz istnieje, odczytujemy jego wartość
+        orientation = pos->value().toLong();
+    }
+
+    // Obracanie obrazu na podstawie orientacji EXIF
+    if (orientation == 3) {
+        // Obrót o 180 stopni
+        rotate(image, image, ROTATE_180);
+    } else if (orientation == 6) {
+        // Obrót o 90 stopni w prawo
+        rotate(image, image, ROTATE_90_COUNTERCLOCKWISE);
+    } else if (orientation == 8) {
+        // Obrót o 90 stopni w lewo
+        rotate(image, image, ROTATE_90_CLOCKWISE);
     }
 
     // Sprawdź, czy ROI jest prawidłowe dla obrazu
