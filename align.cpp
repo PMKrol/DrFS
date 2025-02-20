@@ -161,7 +161,7 @@ void alignImageFFT(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& r
 // as in https://github.com/bznick98/Focus_Stacking/blob/master/src/utils.py (align_images)
 void alignImageSIFT(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
 
-    Ptr<Feature2D> detector = SIFT::create();
+    /*Ptr<Feature2D> detector = SIFT::create();
     
     // Convert to grayscale
     Mat baseGray, imgGray;
@@ -200,7 +200,7 @@ void alignImageSIFT(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat
     scale = std::sqrt(H.at<double>(0, 0) * H.at<double>(0, 0) + H.at<double>(1, 1) * H.at<double>(1, 1)) / std::sqrt(2);
 
     // Calculate shift (only translation component)
-    shift = Point2f(H.at<double>(0, 2), H.at<double>(1, 2));
+    shift = Point2f(H.at<double>(0, 2), H.at<double>(1, 2));*/
 }
 
 // Method 5: Template matching-based alignment (simple implementation)
@@ -300,7 +300,7 @@ void alignImageByFFTAndCanny(const cv::Mat& baseImg, const cv::Mat& imgToAlign, 
 
 // Method 8: SIFT-based translation-only alignment
 void alignImageSIFTTranslationOnly(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
-    Ptr<Feature2D> detector = SIFT::create();
+    /*Ptr<Feature2D> detector = SIFT::create();
     
     // Konwersja obrazów do skali szarości
     Mat baseGray, imgGray;
@@ -344,13 +344,13 @@ void alignImageSIFTTranslationOnly(const cv::Mat& baseImage, const cv::Mat& imgT
     warpAffine(imgToAlign, result, translationMat, baseImage.size());
     
     // Skala w translacji-only wynosi 1
-    scale = 1.0f;
+    scale = 1.0f;*/
     
 }
 
 // Metoda 9: Dopasowanie obrazów z użyciem SIFT bez filtrowania dopasowań i tylko przesunięcie
 void alignImageSIFTNoFilter(const cv::Mat& baseImage, const cv::Mat& imgToAlign, cv::Mat& result, cv::Point2f& shift, float& scale) {
-    Ptr<Feature2D> detector = SIFT::create();
+    /*Ptr<Feature2D> detector = SIFT::create();
 
     // Konwersja obrazów na skale szarości
     Mat baseGray, imgGray;
@@ -388,7 +388,7 @@ void alignImageSIFTNoFilter(const cv::Mat& baseImage, const cv::Mat& imgToAlign,
     warpAffine(imgToAlign, result, translationMat, baseImage.size());
     
     // Skala w translacji-only wynosi 1
-    scale = 1.0f;
+    scale = 1.0f;*/
 }
 
 //Metoda 10:
@@ -545,7 +545,9 @@ void alignImageAffine(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat
     std::sort(matches.begin(), matches.end());
 
     // Keep only the best matches
-    const int numGoodMatches = matches.size() * 0.1;
+    //TODO: * 0.1 gave wrong alignment. Maybe even more than 0.15?
+    //      maybe it will be slower, but more accurate?
+    const int numGoodMatches = matches.size() * 0.15;               
     matches.erase(matches.begin() + numGoodMatches, matches.end());
 
     // Extract point locations from matches
@@ -886,7 +888,8 @@ int main(int argc, char** argv) {
         } else if (alignmentMethod == "-a3") {
             alignImageFFT(baseImage, srcImage, result, shift, scale); // FFT-based alignment
         } else if (alignmentMethod == "-a4") {
-            alignImageSIFT(baseImage, srcImage, result, shift, scale); // SIFT-based alignment
+            std::cout << "Disabled";
+            //alignImageSIFT(baseImage, srcImage, result, shift, scale); // SIFT-based alignment
         } else if (alignmentMethod == "-a5") {
             alignImageByTemplateMatching(baseImage, srcImage, result, shift, scale); // Template matching alignment
         } else if (alignmentMethod == "-a6") {
@@ -894,9 +897,11 @@ int main(int argc, char** argv) {
         } else if (alignmentMethod == "-a7") {
             alignImageByFFTAndCanny(baseImage, srcImage, result, shift, scale);
         } else if (alignmentMethod == "-a8") {
-            alignImageSIFTTranslationOnly(baseImage, srcImage, result, shift, scale); 
+            std::cout << "Disabled";
+            //alignImageSIFTTranslationOnly(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a9") {
-            alignImageSIFTNoFilter(baseImage, srcImage, result, shift, scale);
+            std::cout << "Disabled";
+            //alignImageSIFTNoFilter(baseImage, srcImage, result, shift, scale);
         } else if (alignmentMethod == "-a10") {
             alignImagesECC(baseImage, srcImage, result, shift, scale); 
         } else if (alignmentMethod == "-a11") {

@@ -20,7 +20,7 @@ namespace fs = boost::filesystem;
 
 // Parametry Canny'ego i Hougha
 int lowThreshold = 50;
-int highThreshold = 150;
+int highThreshold = 100;
 //int minLineLength = 300;
 //int maxLineGap = 10;
 
@@ -32,7 +32,7 @@ int highThreshold = 150;
 #define RATIO_MAX_GAP   1/20
 #define MAX_GAP   15
 
-#define ANGLE_DIFF 20.0
+#define ANGLE_DIFF 5.0
 
 // Definiowanie makra do zmniejszania obrazu
 #define SCALE_FACTOR 0.5
@@ -366,6 +366,38 @@ Mat rotateImageToHorizontal(const string& imagePath) {
     return rotatedImage;
 }
 
+void drawHoughLines(cv::Mat& src, const std::vector<cv::Vec2f>& lines)
+{
+    // Kopia obrazu wejściowego
+    cv::Mat imgWithLines = src.clone();
+
+    // Rysowanie linii na kopii obrazu
+    for (size_t i = 0; i < lines.size(); i++)
+    {
+        float rho = lines[i][0];
+        float theta = lines[i][1];
+        
+        // Obliczanie punktów początkowego i końcowego na obrazie
+        double cosTheta = cos(theta);
+        double sinTheta = sin(theta);
+        
+        double x0 = rho * cosTheta;
+        double y0 = rho * sinTheta;
+        
+        double x1 = cvRound(x0 + 1000 * (-sinTheta));
+        double y1 = cvRound(y0 + 1000 * (cosTheta));
+        double x2 = cvRound(x0 - 1000 * (-sinTheta));
+        double y2 = cvRound(y0 - 1000 * (cosTheta));
+        
+        // Rysowanie linii na obrazie
+        cv::line(imgWithLines, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 0, 255), 2, cv::LINE_AA);
+    }
+
+    // Wyświetlanie obrazu z liniami
+    cv::imshow("Lines Detected", resizeImage(imgWithLines));
+    cv::waitKey(0);  // Czekanie na naciśnięcie dowolnego przycisku
+}
+
 // Funkcja do poszukiwania bazy - wykrywanie linii metodą Hougha P z iteracyjnym zwiększaniem maxLineGap
 void baseFind(int, void*) {
     
@@ -401,6 +433,7 @@ void baseFind(int, void*) {
     //resize(edges, edges, croppedImage.size(), 0, 0, INTER_LINEAR);
 
     removeEdgeCrop(edges);
+    
     //imshow("Canny", resizeImage(edges));
     
     // Obliczanie początkowych wartości minLineLength i maxLineGap
@@ -455,10 +488,8 @@ void baseFind(int, void*) {
     while (true) {
         // Wykrywanie linii metodą Hough Lines
         HoughLines(edges, lines, 1, CV_PI / 180, houghThreshold);  // Parametry Hougha
-
-//        if(lines.size() < 2){
-//            continue;
-//        }
+        
+        //drawHoughLines(src, lines);
 
         vector<Vec2f> validLines;
         validLines.clear();
@@ -489,7 +520,7 @@ void baseFind(int, void*) {
     //                    //cout << "   Kąt ok: " << angleDiff  << "( > " << CV_PI / 18 << ")" << endl;
     //                }
 
-                    // Obliczamy odległość między liniami (minimalna odległość = 1/10 szerokości obrazu)
+                    // Obliczamy odległość między liniami (minimalna odległość względem szerokości obrazu)
                     float width = edges.cols;
                     float minDistance = width / 20.0f;
 
@@ -513,13 +544,13 @@ void baseFind(int, void*) {
 
                     // Jeśli odległość między liniami jest większa niż minimalna, linie są validne
                     if (dist >= minDistance && angleDiff < CV_PI / 18) {
-                        cout << "  [OK!] Kąt ok: " << angleDiff  << "( > " << CV_PI / 18 << "), dist: " << dist << " > " << minDistance << endl;
+                        cout << "  [OK!] Kąt ok: " << angleDiff  << "( < " << CV_PI / 18 << "), dist: " << dist << " > " << minDistance << endl;
 
                         validLines.push_back(lines[i]);
                         validLines.push_back(lines[j]);
                         break;
                     }else{
-                        cout << "  Kąt: " << angleDiff  << "( > " << CV_PI / 18 << "), dist: " << minDistance << endl;
+                        cout << "  Kąt: " << angleDiff  << "( > " << CV_PI / 18 << ") || dist: " << dist << " < " << minDistance << endl;
 
                         //cout << "[Stage 2] Threshold: " << threshold << ", dist: " << minDistance << endl;
                     }
