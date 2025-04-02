@@ -18,9 +18,10 @@
         
  * hugely increased Blur kernel on canny images (50 -> 250)
  
+ TODO
+ add cut zero margins in canny
 */
     
-
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <filesystem>
@@ -38,6 +39,8 @@
 #include <thread>
 #include <unordered_map>
 
+#include <glob.h>
+
 namespace fs = std::filesystem;
 
 using namespace cv;
@@ -48,10 +51,10 @@ using namespace std;
 #define CANNY_KERNEL 64
 #define CANNY_TRESHOLD 64
 
-#define MINIMUM_MATCHES 499
+#define MINIMUM_MATCHES 300
 
 #define GOOD_MATCHES_RATIO 1
-#define BLUR_KERNEL_SIZE 150
+#define BLUR_KERNEL_SIZE 250
 
 void alignImageAffine(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat& result, cv::Point2f& shift, float& scale) {
     // Convert images to grayscale
@@ -74,10 +77,10 @@ void alignImageAffine(const cv::Mat& baseImage, const cv::Mat& srcImage, cv::Mat
     std::vector<cv::DMatch> matches;
     matcher.match(descriptorsBase, descriptorsSrc, matches);
     std::sort(matches.begin(), matches.end());
+    
+    std::cout << "Matches size: " << matches.size() << std::endl;
      
-    if(matches.size() > MINIMUM_MATCHES){
-        //std::cout << "Matches size: " << matches.size() << std::endl;
-    }else{
+    if(matches.size() < MINIMUM_MATCHES){
         scale = -1;
         return;
     }
@@ -157,7 +160,7 @@ void align_images(const std::string& directory) {
     // Zapisanie obrazu bazowego z oryginalnym numerem
     std::string baseImageFile = (wipDir / ("Aligned_" + cutFiles[middleIndex].filename().string())).string();
     cv::imwrite(baseImageFile, baseImage);
-    std::cout << "Base image saved with original number: " << baseImageFile << std::endl;
+    std::cout << "Middle image saved with original number: " << baseImageFile << std::endl;
 
     cv::Mat result;
     cv::Point2f shift;
@@ -171,11 +174,11 @@ void align_images(const std::string& directory) {
             continue;
         }
 
-        std::cout << "Processing: " << cutFiles[i].string() << std::endl;
+        std::cout << "Processing: " << cutFiles[i].string(); // << std::endl;
         alignImageAffine(baseImage, srcImage, result, shift, scale);
 
         if (scale == -1) {
-            std::cerr << "Alignment failed for: " << cutFiles[i].string() << std::endl;
+            std::cerr << "Alignment failed." << std::endl; // for: " << cutFiles[i].string() << std::endl;
             break;
         }
 
@@ -346,6 +349,11 @@ std::string findCommonPrefix(const std::vector<std::string>& filenames) {
         if (prefix.empty()) break; // brak wspólnego prefiksu
     }
     
+    // Sprawdź, czy ostatni znak to '0'
+    if (!prefix.empty() && prefix.back() == '0') {
+        prefix.pop_back(); // Usuń ostatni znak
+    }
+    
     // Sprawdź, czy ostatni znak to '-'
     if (!prefix.empty() && prefix.back() == '-') {
         prefix.pop_back(); // Usuń ostatni znak
@@ -434,7 +442,7 @@ std::vector<cv::Mat> loadImagesFromDirectory(const std::string& dirPath, std::ve
         }
         images.push_back(img);
         filenames.push_back(filepath); // Save filename
-        std::cout << "Loaded image: " << filepath << std::endl;  // Display loaded image
+        //std::cout << "Loaded image: " << filepath << std::endl;  // Display loaded image
     }
 
     // Combine images with filenames in pairs
@@ -644,10 +652,10 @@ void computeImageMetricsParallelCanny(
         std::cout << "Processing image " << i + 1 << " of " << normalizedImages.size() << std::endl;
     }
     
-    std::cout << "Typ danych norm: " << normalizedImages[0].type() << std::endl;
+    /*std::cout << "Typ danych norm: " << normalizedImages[0].type() << std::endl;
     std::cout << "Typ danych norm: " << grayImages[0].type() << std::endl;
     std::cout << "Typ danych norm: " << cannyImages[0].type() << std::endl;
-    std::cout << "Typ danych norm: " << edgeSumImages[0].type() << std::endl;
+    std::cout << "Typ danych norm: " << edgeSumImages[0].type() << std::endl;*/
 
 }
 
@@ -761,7 +769,7 @@ cv::Mat stackWithCanny(const std::vector<cv::Mat>& images, const std::string& ou
     std::cout << "Normalizing images." << std::endl;
     std::vector<cv::Mat> normalizedImages = images;
     normalizeImages(normalizedImages);
-    std::cout << "Done" << std::endl;
+    //std::cout << "Done" << std::endl;
 
     int rows = normalizedImages[0].rows;
     int cols = normalizedImages[0].cols;
@@ -781,7 +789,7 @@ cv::Mat stackWithCanny(const std::vector<cv::Mat>& images, const std::string& ou
         cv::imwrite(output_dir + "/dbg_matrixCanny" + std::to_string(i) + ".png", cannyWeight[i]);
     }
 
-    std::cout << "Done." << std::endl;
+    //std::cout << "Done." << std::endl;
 
     cv::Mat indexMatrix = cv::Mat::zeros(rows, cols, CV_8U);
 
@@ -891,10 +899,41 @@ void stack_images(const std::string& dirPath) {
     saveResult(result, filenames, "-m11");
 }
 
+void clean_wip_directory(const std::string& wip_dir) {
+    const std::vector<std::string> patterns = {
+        "*.cut.png",
+        "*.cut.txt",
+        "Aligned_*.png",
+        "Aligned_*.png.txt",
+        "dbg_matrixCanny*.png",
+        "dbg_indexMatrixNorm.png"
+    };
 
+    for (const auto& pattern : patterns) {
+        // Znajdowanie plików pasujących do wzorca
+        glob_t glob_result;
+        std::string search_path = wip_dir + "/wip/" + pattern;
+        glob(search_path.c_str(), GLOB_TILDE, NULL, &glob_result);
+        
+        for (size_t i = 0; i < glob_result.gl_pathc; ++i) {
+            try {
+                std::filesystem::remove(glob_result.gl_pathv[i]);
+                std::cout << "Usunięto plik: " << glob_result.gl_pathv[i] << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Błąd podczas usuwania pliku: " << glob_result.gl_pathv[i] << " - " << e.what() << std::endl;
+            }
+        }
+
+        globfree(&glob_result);
+    }
+}
 
 void printUsage() {
-    std::cerr << "Użycie: ./program [--cut] [--align] [--stack] [x,y,w,h] katalog1 [katalog2 ...]" << std::endl;
+    std::cerr << "Użycie: ./program [--cut x,y,w,h] [--align] [--stack] [--clean] katalog1 [katalog2 ...]" << std::endl;
+    std::cerr << "  --cut       Przycinanie obrazów." << std::endl;
+    std::cerr << "  --align     Wyrównanie obrazów." << std::endl;
+    std::cerr << "  --stack     Tworzenie stosu obrazów." << std::endl;
+    std::cerr << "  --clean     Opróżnia katalog 'wip' z plików *.cut.png, *.cut.txt, Aligned_*.png, Aligned_*.png.txt, dbg_matrixCanny*.png, dbg_indexMatrixNorm.png" << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -915,7 +954,8 @@ int main(int argc, char** argv) {
         if (argc > 1) {
             int roiX, roiY, roiW, roiH;
             if (sscanf(argv[1], "%d,%d,%d,%d", &roiX, &roiY, &roiW, &roiH) == 4) {
-                roi = cv::Rect(roiX, roiY, roiW, roiH);
+                int margin = CANNY_KERNEL * 2;
+                roi = cv::Rect(roiX - margin, roiY - margin, roiW + 2 * margin, roiH + 2 * margin);
                 argc--; argv++;
             } else {
                 std::cerr << "Invalid ROI format. Expected format: x,y,w,h" << std::endl;
@@ -945,6 +985,14 @@ int main(int argc, char** argv) {
         stack = true;
         argc--; argv++;
         cout << "Will stack." << std::endl;
+    }    
+    
+    // Obsługa --clean
+    bool clean = false;
+    if (argc > 1 && std::string(argv[1]) == "--clean") {
+        clean = true;
+        argc--; argv++;
+        cout << "Will cleanup." << std::endl;
     }
 
     // Obsługa --edges_cut
@@ -974,7 +1022,15 @@ int main(int argc, char** argv) {
             cout << "Starting stack stage." << std::endl;
             // Funkcja obsługująca tworzenie stosu obrazów
             stack_images(dirPath);
-        }// else if (edgesCut) {
+        }
+        
+        if (clean) {
+            cout << "Starting cleaning stage." << std::endl;
+            // Funkcja obsługująca tworzenie stosu obrazów
+            clean_wip_directory(dirPath);
+        }
+        
+        // else if (edgesCut) {
             // Funkcja obsługująca przycinanie krawędzi obrazów
             //edges_cut(dirPath);
         //}
